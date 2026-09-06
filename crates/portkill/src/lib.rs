@@ -2,7 +2,7 @@
 
 mod cli;
 mod lsof;
-pub mod netstat;
+mod netstat;
 mod socket;
 
 use std::collections::HashSet;
@@ -92,11 +92,14 @@ fn run_kill(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
     }
 
     let mut killed_pids = HashSet::new();
+    #[cfg(not(windows))]
     let signal_name = if p.force {
         "SIGKILL (-9)"
     } else {
         "SIGTERM (-15)"
     };
+    #[cfg(windows)]
+    let signal_name = if p.force { "taskkill /F" } else { "taskkill" };
 
     let mut had_failures = false;
     for sock in matched {

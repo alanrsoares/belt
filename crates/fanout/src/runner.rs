@@ -433,22 +433,18 @@ pub(crate) fn resolve_runner_bin(bin: &str) -> String {
         if bin.ends_with(".exe") || bin.ends_with(".cmd") || bin.ends_with(".bat") {
             return bin.to_string();
         }
-        if let Ok(path_var) = std::env::var("PATH") {
-            for dir in std::env::split_paths(&path_var) {
-                let cmd_path = dir.join(format!("{bin}.cmd"));
-                if cmd_path.is_file() {
-                    return format!("{bin}.cmd");
-                }
-                let exe_path = dir.join(format!("{bin}.exe"));
-                if exe_path.is_file() {
-                    return format!("{bin}.exe");
+        if matches!(bin, "npm" | "pnpm" | "yarn") {
+            if let Ok(path_var) = std::env::var("PATH") {
+                for dir in std::env::split_paths(&path_var) {
+                    let cmd_path = dir.join(format!("{bin}.cmd"));
+                    if cmd_path.is_file() {
+                        return cmd_path.to_string_lossy().to_string();
+                    }
                 }
             }
+            return format!("{bin}.cmd");
         }
-        match bin {
-            "npm" | "pnpm" | "yarn" => format!("{bin}.cmd"),
-            _ => bin.to_string(),
-        }
+        bin.to_string()
     }
     #[cfg(not(windows))]
     {

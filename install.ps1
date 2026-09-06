@@ -58,8 +58,9 @@ $ApiUrl = if ($env:BELT_API_URL) {
     "https://api.github.com/repos/$Repo/releases/latest"
 }
 
+$ReleaseVersion = if ($env:BELT_VERSION) { $env:BELT_VERSION } else { 'latest' }
 Write-Host "» platform: windows-$Arch"
-Write-Host "» looking up release ($($env:BELT_VERSION ?? 'latest'))…"
+Write-Host "» looking up release ($ReleaseVersion)…"
 
 try {
     $Release = Invoke-RestMethod -Uri $ApiUrl -Headers $Headers -Method Get

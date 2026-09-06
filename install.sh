@@ -140,7 +140,7 @@ pick_asset() {
 
 TARBALL_REF=$(pick_asset "$ASSET")
 [ -n "$TARBALL_REF" ] || fail "this release has no ${OS}-${ARCH} build ($ASSET).
-       CI builds macos-arm64, macos-x64, linux-x64 and linux-arm64."
+       CI builds macos-arm64, macos-x64, linux-x64, linux-arm64, and windows-x64."
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/belt-install.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM

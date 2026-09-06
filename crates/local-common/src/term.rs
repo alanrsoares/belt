@@ -264,21 +264,22 @@ impl Colour {
     }
 }
 
+/// Returns whether `path` begins with a Windows drive root (e.g. `C:\` or `D:/`).
+///
+/// Kept explicit so cross-platform unit tests running on Unix hosts can format
+/// Windows paths without the host OS rejecting drive letters as relative.
+fn has_windows_drive_prefix(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
 /// Build a `file://` URI for `path`, percent-encoding bytes that are unsafe
 /// inside a URI (spaces, non-ASCII, …). Relative paths are resolved against
 /// the current working directory; the target need not exist yet, so this is
 /// safe to call before a file has been written.
 pub fn file_uri(path: &std::path::Path) -> String {
-    let raw = path.to_string_lossy();
-    let is_windows_abs = {
-        let b = raw.as_bytes();
-        b.len() >= 3
-            && b[0].is_ascii_alphabetic()
-            && b[1] == b':'
-            && (b[2] == b'\\' || b[2] == b'/')
-    };
-
-    let abs = if path.is_absolute() || is_windows_abs {
+    let abs = if path.is_absolute() || has_windows_drive_prefix(path) {
         path.to_path_buf()
     } else {
         std::env::current_dir()

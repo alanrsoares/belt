@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::process::Command;
 
-pub use crate::socket::ProcessSocket;
+pub use crate::socket::{extract_port, ProcessSocket};
 
 /// Query active listening TCP sockets from `lsof`.
 pub fn query_sockets() -> std::io::Result<Vec<ProcessSocket>> {
@@ -82,13 +82,6 @@ pub fn parse_lsof_output(raw: &str) -> Vec<ProcessSocket> {
 
     results.sort_by_key(|s| s.port);
     results
-}
-
-/// Extract port number from address string like `*:3000`, `127.0.0.1:8080`, `[::1]:5173`.
-fn extract_port(address: &str) -> Option<u16> {
-    let last_colon = address.rfind(':')?;
-    let port_str = &address[last_colon + 1..];
-    port_str.parse::<u16>().ok()
 }
 
 /// Terminate process by PID.

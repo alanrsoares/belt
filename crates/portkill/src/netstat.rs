@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
 use std::process::Command;
 
-use crate::ProcessSocket;
+use crate::socket::{extract_port, ProcessSocket};
 
 /// Query active listening TCP sockets on Windows via `netstat -ano -p tcp` and `tasklist`.
 #[cfg(windows)]
@@ -109,16 +109,11 @@ pub fn parse_netstat_output(raw: &str, task_map: &HashMap<u32, String>) -> Vec<P
     results
 }
 
-fn extract_port(address: &str) -> Option<u16> {
-    let last_colon = address.rfind(':')?;
-    let port_str = &address[last_colon + 1..];
-    port_str.parse::<u16>().ok()
-}
-
 /// Parse CSV output from `tasklist /FO CSV /NH`.
 ///
 /// Format:
 /// `"node.exe","14280","Console","1","35,420 K"`
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn parse_tasklist_output(raw: &str) -> HashMap<u32, String> {
     let mut map = HashMap::new();
     for line in raw.lines() {

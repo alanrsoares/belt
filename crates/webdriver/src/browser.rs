@@ -409,6 +409,7 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
     ];
 
     for path in candidates {
@@ -418,14 +419,30 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
         }
     }
 
+    for pf_var in &["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Ok(pf) = env::var(pf_var) {
+            let pf_dir = PathBuf::from(pf);
+            for rel in &[
+                r"Google\Chrome\Application\chrome.exe",
+                r"Microsoft\Edge\Application\msedge.exe",
+                r"BraveSoftware\Brave-Browser\Application\brave.exe",
+            ] {
+                let full = pf_dir.join(rel);
+                if full.exists() {
+                    return Ok(full);
+                }
+            }
+        }
+    }
+
     if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
-        let lad = PathBuf::from(local_app_data);
+        let local_app_data_dir = PathBuf::from(local_app_data);
         for rel in &[
             r"Google\Chrome\Application\chrome.exe",
             r"Microsoft\Edge\Application\msedge.exe",
             r"BraveSoftware\Brave-Browser\Application\brave.exe",
         ] {
-            let full = lad.join(rel);
+            let full = local_app_data_dir.join(rel);
             if full.exists() {
                 return Ok(full);
             }
