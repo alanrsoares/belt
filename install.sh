@@ -82,7 +82,8 @@ fetch_to() {
 case "$(uname -s)" in
   Darwin) OS="macos" ;;
   Linux) OS="linux" ;;
-  *) fail "unsupported OS: $(uname -s) (belt ships macOS and Linux builds)" ;;
+  MINGW* | MSYS* | CYGWIN*) OS="windows" ;;
+  *) fail "unsupported OS: $(uname -s) (belt ships macOS, Linux, and Windows builds)" ;;
 esac
 
 case "$(uname -m)" in
@@ -173,18 +174,22 @@ fi
 tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
 mkdir -p "$BIN_DIR"
 
+EXE_EXT=""
+[ "$OS" = windows ] && EXE_EXT=".exe"
+
 for tool in $TOOLS; do
-  [ -f "$TMP_DIR/$tool" ] || fail "$tool is missing from $ASSET"
-  install -m 755 "$TMP_DIR/$tool" "$BIN_DIR/$tool" 2>/dev/null || {
-    cp "$TMP_DIR/$tool" "$BIN_DIR/$tool"
-    chmod 755 "$BIN_DIR/$tool"
+  bin="${tool}${EXE_EXT}"
+  [ -f "$TMP_DIR/$bin" ] || fail "$bin is missing from $ASSET"
+  install -m 755 "$TMP_DIR/$bin" "$BIN_DIR/$bin" 2>/dev/null || {
+    cp "$TMP_DIR/$bin" "$BIN_DIR/$bin"
+    chmod 755 "$BIN_DIR/$bin" 2>/dev/null || true
   }
   # Release binaries are ad-hoc signed by the linker but unnotarized; clear
   # quarantine so Gatekeeper doesn't block them on macOS.
   if [ "$OS" = macos ] && command -v xattr >/dev/null 2>&1; then
-    xattr -d com.apple.quarantine "$BIN_DIR/$tool" 2>/dev/null || true
+    xattr -d com.apple.quarantine "$BIN_DIR/$bin" 2>/dev/null || true
   fi
-  say "✓ $BIN_DIR/$tool"
+  say "✓ $BIN_DIR/$bin"
 done
 
 case ":$PATH:" in

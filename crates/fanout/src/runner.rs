@@ -427,6 +427,35 @@ fn print_plan_header(tasks: &[TaskSpec], opts: &Options, s: &Styles) {
     );
 }
 
+pub(crate) fn resolve_runner_bin(bin: &str) -> String {
+    #[cfg(windows)]
+    {
+        if bin.ends_with(".exe") || bin.ends_with(".cmd") || bin.ends_with(".bat") {
+            return bin.to_string();
+        }
+        if let Ok(path_var) = std::env::var("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                let cmd_path = dir.join(format!("{bin}.cmd"));
+                if cmd_path.is_file() {
+                    return format!("{bin}.cmd");
+                }
+                let exe_path = dir.join(format!("{bin}.exe"));
+                if exe_path.is_file() {
+                    return format!("{bin}.exe");
+                }
+            }
+        }
+        match bin {
+            "npm" | "pnpm" | "yarn" => format!("{bin}.cmd"),
+            _ => bin.to_string(),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        bin.to_string()
+    }
+}
+
 fn run_single_task(
     spec: &TaskSpec,
     timeout_ms: u64,
@@ -436,11 +465,14 @@ fn run_single_task(
     bail_ref: &AtomicBool,
     color_opt: bool,
 ) -> (Outcome, i32, Vec<String>) {
-    let mut cmd = Command::new(&spec.runner_bin);
+    let runner = resolve_runner_bin(&spec.runner_bin);
+    let mut cmd = Command::new(&runner);
     cmd.args(&spec.args)
         .current_dir(&spec.cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    local_common::process::own_process_group(&mut cmd);
 
     if color_opt {
         cmd.env("FORCE_COLOR", "1");
@@ -518,12 +550,12 @@ fn run_single_task(
 
     let (outcome, exit_code) = loop {
         if bail_ref.load(Ordering::SeqCst) {
-            let _ = child.kill();
+            local_common::process::terminate(&mut child);
             break (Outcome::Cancelled, 0);
         }
 
         if task_start.elapsed() >= timeout {
-            let _ = child.kill();
+            local_common::process::terminate(&mut child);
             break (Outcome::Timeout, 124);
         }
 
@@ -843,6 +875,25 @@ impl PadExt for str {
             self.to_string()
         } else {
             format!("{}{}", " ".repeat(width - w), self)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_runner_bin() {
+        #[cfg(not(windows))]
+        {
+            assert_eq!(resolve_runner_bin("npm"), "npm");
+            assert_eq!(resolve_runner_bin("cargo"), "cargo");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(resolve_runner_bin("npm.cmd"), "npm.cmd");
+            assert_eq!(resolve_runner_bin("cargo.exe"), "cargo.exe");
         }
     }
 }

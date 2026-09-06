@@ -59,6 +59,7 @@ fn query_terminal_columns() -> usize {
         }
     }
 
+    #[cfg(unix)]
     if let Ok(output) = std::process::Command::new("stty").arg("size").output() {
         if output.status.success() {
             if let Ok(s) = std::str::from_utf8(&output.stdout) {
@@ -268,7 +269,16 @@ impl Colour {
 /// the current working directory; the target need not exist yet, so this is
 /// safe to call before a file has been written.
 pub fn file_uri(path: &std::path::Path) -> String {
-    let abs = if path.is_absolute() {
+    let raw = path.to_string_lossy();
+    let is_windows_abs = {
+        let b = raw.as_bytes();
+        b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'\\' || b[2] == b'/')
+    };
+
+    let abs = if path.is_absolute() || is_windows_abs {
         path.to_path_buf()
     } else {
         std::env::current_dir()
@@ -276,9 +286,16 @@ pub fn file_uri(path: &std::path::Path) -> String {
             .unwrap_or_else(|_| path.to_path_buf())
     };
 
+    let path_str = abs.to_string_lossy();
     let mut uri = String::from("file://");
-    for byte in abs.to_string_lossy().bytes() {
+    if !path_str.starts_with('/') {
+        uri.push('/');
+    }
+
+    for byte in path_str.bytes() {
         match byte {
+            b'\\' => uri.push('/'),
+            b':' => uri.push(':'),
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 uri.push(byte as char)
             }
@@ -368,5 +385,13 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let expected = format!("file://{}/out.png", cwd.display());
         assert_eq!(file_uri(std::path::Path::new("out.png")), expected);
+    }
+
+    #[test]
+    fn file_uri_formats_windows_style_paths() {
+        assert_eq!(
+            file_uri(std::path::Path::new(r"C:\my dir\out.png")),
+            "file:///C:/my%20dir/out.png"
+        );
     }
 }

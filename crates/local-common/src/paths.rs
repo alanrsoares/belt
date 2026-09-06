@@ -19,9 +19,11 @@ use std::path::{Path, PathBuf};
 /// `~/.config/belt/<tool>`.
 pub const TOOL_ROOT: &str = "belt";
 
-/// Resolve the user's home directory from `$HOME` (the reliable POSIX source).
+/// Resolve the user's home directory from `$HOME` (or `%USERPROFILE%` on Windows).
 pub fn home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// XDG config dir for `tool`, e.g. `~/.config/belt/<tool>`.

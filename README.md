@@ -9,8 +9,10 @@ ad-hoc shell functions with something versioned, testable, and shareable.
 
 ## Install
 
-Prebuilt binaries for macOS (arm64/x64) and Linux (x64/arm64) ship with every
+Prebuilt binaries for macOS (arm64/x64), Linux (x64/arm64), and Windows (x64) ship with every
 tagged release:
+
+### macOS & Linux (sh)
 
 ```sh
 # everything into ~/.local/bin
@@ -18,6 +20,16 @@ curl -fsSL https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | 
 
 # or just the tools you want
 curl -fsSL https://raw.githubusercontent.com/alanrsoares/belt/main/install.sh | sh -s -- webdriver jwt
+```
+
+### Windows (PowerShell)
+
+```powershell
+# everything into ~\.local\bin
+irm https://raw.githubusercontent.com/alanrsoares/belt/main/install.ps1 | iex
+
+# or just the tools you want
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/alanrsoares/belt/main/install.ps1))) webdriver jwt
 ```
 
 `BELT_BIN_DIR` overrides the destination, `BELT_VERSION` pins a

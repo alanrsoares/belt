@@ -2,6 +2,8 @@
 
 mod cli;
 mod lsof;
+pub mod netstat;
+mod socket;
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -9,7 +11,15 @@ use std::io::Write;
 use local_common::Colour;
 
 use cli::{Action, Parsed};
-pub use lsof::{kill_process, parse_lsof_output, query_sockets, ProcessSocket};
+pub use lsof::parse_lsof_output;
+pub use netstat::parse_netstat_output;
+pub use socket::ProcessSocket;
+
+#[cfg(not(windows))]
+pub use lsof::{kill_process, query_sockets};
+
+#[cfg(windows)]
+pub use netstat::{kill_process, query_sockets};
 
 /// Main runner invoked by `main.rs`.
 pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {

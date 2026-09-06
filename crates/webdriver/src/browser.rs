@@ -404,12 +404,31 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
         "/usr/bin/microsoft-edge",
         "/usr/bin/microsoft-edge-stable",
         "/snap/bin/chromium",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
     ];
 
     for path in candidates {
         let p = Path::new(path);
         if p.exists() {
             return Ok(p.to_path_buf());
+        }
+    }
+
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let lad = PathBuf::from(local_app_data);
+        for rel in &[
+            r"Google\Chrome\Application\chrome.exe",
+            r"Microsoft\Edge\Application\msedge.exe",
+            r"BraveSoftware\Brave-Browser\Application\brave.exe",
+        ] {
+            let full = lad.join(rel);
+            if full.exists() {
+                return Ok(full);
+            }
         }
     }
 
@@ -424,17 +443,24 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
                 "brave-browser",
                 "microsoft-edge",
                 "microsoft-edge-stable",
+                "chrome",
+                "msedge",
+                "brave",
             ] {
                 let full = dir.join(bin_name);
                 if full.is_file() {
                     return Ok(full);
+                }
+                let full_exe = dir.join(format!("{bin_name}.exe"));
+                if full_exe.is_file() {
+                    return Ok(full_exe);
                 }
             }
         }
     }
 
     Err(
-        "no Chromium-based browser found. Install Chromium, Google Chrome, or Brave, or set CHROME_BIN."
+        "no Chromium-based browser found. Install Chromium, Google Chrome, Edge, or Brave, or set CHROME_BIN."
             .to_string(),
     )
 }
