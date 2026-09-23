@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod dag;
 pub mod json;
+pub mod report;
 pub mod runner;
 pub mod scm;
 pub mod ui;
