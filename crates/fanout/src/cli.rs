@@ -16,7 +16,8 @@ TARGETS:
 
 FLAGS:
     --bail             Abort remaining tasks on first failure
-    --compact          Machine-readable mode: no cursor jumps, output only on failure
+    --compact          CI report, but silent until a task fails
+                       (the report is the default off a TTY or with CI=true)
     --dry-run          Print the resolved task list and exit without running it
     --topological      Enforce topological package dependency order (^build)
     --color            Force ANSI color output

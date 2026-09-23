@@ -13,6 +13,7 @@ use local_common::is_terminal;
 
 use crate::cli::Options;
 use crate::dag::{TaskGraph, TurboPipeline};
+use crate::report;
 use crate::ui::{
     draw_meter, format_duration, phase_icon, phase_text, terminal_columns, visible_width,
     CursorGuard, Outcome, Styles,
@@ -33,8 +34,27 @@ pub enum Event {
         outcome: Outcome,
         duration: Duration,
         exit_code: i32,
-        tail_lines: Vec<String>,
+        tail: Tail,
     },
+}
+
+/// The last `--tail` lines a task printed, and how many earlier ones fell off.
+#[derive(Debug, Default)]
+pub struct Tail {
+    pub lines: Vec<String>,
+    pub omitted: usize,
+}
+
+/// How progress is written. Chosen from the stream and `CI`, never from
+/// colour: `NO_COLOR` on a terminal still gets the live view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Pinned status block, prefixed live output.
+    Live,
+    /// Plain `running` / `passed` / failure blocks and a summary line.
+    Report,
+    /// `Report`, but silent until something fails.
+    Compact,
 }
 
 #[derive(Debug, Clone)]
@@ -80,8 +100,16 @@ pub fn execute_tasks(
         stdout_is_tty && std::env::var_os("NO_COLOR").is_none()
     };
 
+    let mode = if opts.compact {
+        Mode::Compact
+    } else if stdout_is_tty && !report::ci_env_set() {
+        Mode::Live
+    } else {
+        Mode::Report
+    };
+
     let styles = Styles::new(color_enabled);
-    let interactive = stdout_is_tty && !opts.compact;
+    let interactive = mode == Mode::Live;
     let _cursor_guard = CursorGuard::new(interactive);
 
     let gutter = tasks.iter().map(|t| t.name.len()).max().unwrap_or(10);
@@ -175,7 +203,7 @@ pub fn execute_tasks(
             let spec = &tasks_ref[next_idx];
             let task_start = Instant::now();
 
-            let (outcome, exit_code, tail_lines) = run_single_task(
+            let (outcome, exit_code, tail) = run_single_task(
                 spec, timeout_ms, tail_cap, &tx_clone, next_idx, &bail_ref, color_opt,
             );
 
@@ -213,7 +241,7 @@ pub fn execute_tasks(
                 outcome,
                 duration,
                 exit_code,
-                tail_lines,
+                tail,
             });
         });
 
@@ -231,7 +259,6 @@ pub fn execute_tasks(
         };
         num_tasks
     ];
-    let mut buffered_logs: Vec<Vec<String>> = vec![Vec::new(); num_tasks];
     let mut results: Vec<Option<TaskResult>> = vec![None; num_tasks];
     let mut painted_lines = 0;
     let mut frame: usize = 0;
@@ -249,13 +276,21 @@ pub fn execute_tasks(
                     states[index].phase = Outcome::Running;
                     states[index].began = Some(Instant::now());
                     state_changed = true;
+                    if mode == Mode::Report {
+                        let _ = out.write_all(report::started(&tasks[index].name).as_bytes());
+                        has_output = true;
+                    }
                 }
                 Event::TaskLine {
                     index,
                     text,
                     is_stderr,
                 } => {
-                    if interactive && painted_lines > 0 {
+                    if !interactive {
+                        // Off the live view only the retained tail is shown.
+                        continue;
+                    }
+                    if painted_lines > 0 {
                         clear_pinned(&mut out, painted_lines);
                         painted_lines = 0;
                     }
@@ -272,18 +307,14 @@ pub fn execute_tasks(
                         if is_stderr { "┃" } else { "│" }
                     );
                     let rendered = format!("{}{}{}\n", prefix, styles.reset(), text);
-                    if interactive {
-                        let _ = out.write_all(rendered.as_bytes());
-                    } else if !opts.compact {
-                        buffered_logs[index].push(rendered);
-                    }
+                    let _ = out.write_all(rendered.as_bytes());
                 }
                 Event::TaskFinished {
                     index,
                     outcome,
                     duration,
                     exit_code,
-                    tail_lines,
+                    tail,
                 } => {
                     if interactive && painted_lines > 0 {
                         clear_pinned(&mut out, painted_lines);
@@ -303,39 +334,21 @@ pub fn execute_tasks(
                         color_idx: spec.color_idx,
                     });
 
-                    if interactive {
-                        let verdict =
-                            format_verdict(spec, outcome, duration, exit_code, gutter, &styles);
-                        let _ = out.write_all(verdict.as_bytes());
-                    } else if opts.compact {
-                        if outcome != Outcome::Passed && outcome != Outcome::Cancelled {
-                            let _ = writeln!(
-                                out,
-                                "{} {} ({})",
-                                match outcome {
-                                    Outcome::Failed(_) => "FAILED",
-                                    Outcome::Timeout => "TIMEOUT",
-                                    _ => "ERROR",
-                                },
-                                spec.name,
-                                format_duration(duration)
-                            );
-                            if !tail_lines.is_empty() {
-                                let _ = writeln!(out, "--- {}", spec.name);
-                                for line in &tail_lines {
-                                    let _ = writeln!(out, "{line}");
-                                }
-                            }
+                    let block = match mode {
+                        Mode::Live => {
+                            format_verdict(spec, outcome, duration, exit_code, gutter, &styles)
                         }
-                    } else {
-                        // Non-interactive standard output
-                        for line in &buffered_logs[index] {
-                            let _ = out.write_all(line.as_bytes());
-                        }
-                        let verdict =
-                            format_verdict(spec, outcome, duration, exit_code, gutter, &styles);
-                        let _ = out.write_all(verdict.as_bytes());
-                    }
+                        Mode::Compact if !outcome.is_bad() => String::new(),
+                        Mode::Report | Mode::Compact => report::settled(
+                            &spec.name,
+                            outcome,
+                            exit_code,
+                            duration,
+                            &tail.lines,
+                            tail.omitted,
+                        ),
+                    };
+                    let _ = out.write_all(block.as_bytes());
                 }
             }
         }
@@ -351,6 +364,9 @@ pub fn execute_tasks(
             painted_lines = paint_status_block(
                 &mut out, &tasks, &states, frame, start_time, gutter, &styles,
             );
+            let _ = out.flush();
+        } else if has_output {
+            // A CI log should show each line as it happens, not at exit.
             let _ = out.flush();
         }
 
@@ -397,11 +413,17 @@ pub fn execute_tasks(
     let final_results: Vec<TaskResult> = results.into_iter().flatten().collect();
     let total_elapsed = start_time.elapsed();
 
-    if !opts.compact {
-        print_verdict_summary(&final_results, total_elapsed, gutter, &styles);
+    let has_failures = final_results.iter().any(|r| r.outcome.is_bad());
+
+    match mode {
+        Mode::Live => print_verdict_summary(&final_results, total_elapsed, gutter, &styles),
+        Mode::Compact if !has_failures => {}
+        Mode::Report | Mode::Compact => {
+            let _ = out.write_all(report::summary(&final_results, total_elapsed).as_bytes());
+            let _ = out.flush();
+        }
     }
 
-    let has_failures = final_results.iter().any(|r| r.outcome.is_bad());
     if has_failures {
         1
     } else {
@@ -460,7 +482,7 @@ fn run_single_task(
     idx: usize,
     bail_ref: &AtomicBool,
     color_opt: bool,
-) -> (Outcome, i32, Vec<String>) {
+) -> (Outcome, i32, Tail) {
     let runner = resolve_runner_bin(&spec.runner_bin);
     let mut cmd = Command::new(&runner);
     cmd.args(&spec.args)
@@ -482,14 +504,18 @@ fn run_single_task(
                 text: format!("spawn failed: {e}"),
                 is_stderr: true,
             });
-            return (Outcome::Failed(1), 1, vec![format!("spawn error: {e}")]);
+            let tail = Tail {
+                lines: vec![format!("spawn error: {e}")],
+                omitted: 0,
+            };
+            return (Outcome::Failed(1), 1, tail);
         }
     };
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let collected_tail = Arc::new(Mutex::new(VecDeque::new()));
+    let collected_tail = Arc::new(Mutex::new((VecDeque::new(), 0usize)));
 
     let t1_tail = Arc::clone(&collected_tail);
     let t1_tx = tx.clone();
@@ -497,16 +523,7 @@ fn run_single_task(
         if let Some(pipe) = stdout_pipe {
             let reader = BufReader::new(pipe);
             for line in reader.lines().map_while(Result::ok) {
-                {
-                    let mut t = match t1_tail.lock() {
-                        Ok(l) => l,
-                        Err(p) => p.into_inner(),
-                    };
-                    t.push_back(line.clone());
-                    if tail_cap > 0 && t.len() > tail_cap {
-                        t.pop_front();
-                    }
-                }
+                push_tail(&t1_tail, &line, tail_cap);
                 let _ = t1_tx.send(Event::TaskLine {
                     index: idx,
                     text: line,
@@ -522,16 +539,7 @@ fn run_single_task(
         if let Some(pipe) = stderr_pipe {
             let reader = BufReader::new(pipe);
             for line in reader.lines().map_while(Result::ok) {
-                {
-                    let mut t = match t2_tail.lock() {
-                        Ok(l) => l,
-                        Err(p) => p.into_inner(),
-                    };
-                    t.push_back(line.clone());
-                    if tail_cap > 0 && t.len() > tail_cap {
-                        t.pop_front();
-                    }
-                }
+                push_tail(&t2_tail, &line, tail_cap);
                 let _ = t2_tx.send(Event::TaskLine {
                     index: idx,
                     text: line,
@@ -576,15 +584,35 @@ fn run_single_task(
     let _ = h_stdout.join();
     let _ = h_stderr.join();
 
-    let tail_lines: Vec<String> = {
+    let tail = {
         let lock = match collected_tail.lock() {
             Ok(l) => l,
             Err(p) => p.into_inner(),
         };
-        lock.iter().cloned().collect()
+        Tail {
+            lines: lock.0.iter().cloned().collect(),
+            omitted: lock.1,
+        }
     };
 
-    (outcome, exit_code, tail_lines)
+    (outcome, exit_code, tail)
+}
+
+/// Retain `line` in a task's tail, keeping at most `cap` lines (0 = all) and
+/// counting the ones that drop off the front.
+fn push_tail(tail: &Mutex<(VecDeque<String>, usize)>, line: &str, cap: usize) {
+    if !report::keep_in_tail(line) {
+        return;
+    }
+    let mut t = match tail.lock() {
+        Ok(l) => l,
+        Err(p) => p.into_inner(),
+    };
+    t.0.push_back(line.to_string());
+    if cap > 0 && t.0.len() > cap {
+        t.0.pop_front();
+        t.1 += 1;
+    }
 }
 
 fn clear_pinned(out: &mut impl Write, count: usize) {

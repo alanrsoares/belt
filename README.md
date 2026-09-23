@@ -94,6 +94,36 @@ root:
 with no entry keeps the conventions. `fanout <target> --dry-run` prints the
 resolved list without running it — the quickest way to confirm a config.
 
+Ready tasks start longest-first. Names containing `test` rank as heavy; a long
+task named anything else gets a `cost` so it does not start behind short ones
+(`test*` scores 3, the default is 0):
+
+```json
+{ "targets": { "check:full": { "root": ["…"], "cost": { "seed:check": 5, "bootstrap:self-tsc": 5 } } } }
+```
+
+### `fanout` in CI
+
+Off a TTY, or with `CI=true` / `CI=1`, `fanout` drops the live view and prints
+plain lines that start at column 0, so GitHub Actions picks up the workflow
+commands:
+
+```
+running test:full
+failed test:full exit=1 duration=533.69s
+::group::test:full
+<last --tail lines, unprefixed>
+::endgroup::
+::error title=test%3Afull::failed in 533.69s (exit 1)
+11 tasks: 10 passed, 1 failed (660.25s) — test:full
+::error::11 tasks: 10 passed, 1 failed (660.25s) — test:full
+```
+
+A child's `::error::` / `::warning::` / `::notice::` lines pass through; its
+`::group::` lines are dropped so the task's group stays open. `--compact` prints
+the same blocks but says nothing until something fails. Colour does not pick
+the mode: `NO_COLOR` on a terminal keeps the live view.
+
 ## Conventions
 
 * **Edition 2021, `unsafe_code = "forbid"`, `clippy::all = warn`** — enforced

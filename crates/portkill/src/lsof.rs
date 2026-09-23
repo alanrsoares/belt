@@ -4,11 +4,13 @@
 //! The parser is completely pure and isolated from I/O so it is easily unit-tested.
 
 use std::collections::HashSet;
+#[cfg(not(windows))]
 use std::process::Command;
 
 pub use crate::socket::{extract_port, ProcessSocket};
 
 /// Query active listening TCP sockets from `lsof`.
+#[cfg(not(windows))]
 pub fn query_sockets() -> std::io::Result<Vec<ProcessSocket>> {
     let output = Command::new("lsof")
         .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
@@ -87,6 +89,7 @@ pub fn parse_lsof_output(raw: &str) -> Vec<ProcessSocket> {
 /// Terminate process by PID.
 ///
 /// If `force` is true, sends `SIGKILL` (`kill -9`), otherwise `SIGTERM` (`kill -15`).
+#[cfg(not(windows))]
 pub fn kill_process(pid: u32, force: bool) -> std::io::Result<()> {
     let signal = if force { "-9" } else { "-TERM" };
     let status = Command::new("kill")
