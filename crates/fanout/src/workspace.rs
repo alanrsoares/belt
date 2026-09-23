@@ -287,8 +287,17 @@ pub fn read_turbo_pipeline(root_dir: &Path) -> Option<TurboPipeline> {
     Some(TurboPipeline { task_rules: rules })
 }
 
+/// Scheduling rank for a task; higher starts first. A `cost` the target's
+/// `fanout.json` entry declares for this task wins over the name heuristic.
+fn task_cost(task_name: &str, configured: Option<&config::TargetConfig>) -> usize {
+    configured
+        .and_then(|cfg| cfg.cost.get(task_name).copied())
+        .unwrap_or_else(|| estimate_cost(task_name))
+}
+
 fn estimate_cost(task_name: &str) -> usize {
-    if task_name.starts_with("test") {
+    // `test`, `test:full` at the root; `@w/app:test` inside a package.
+    if task_name.starts_with("test") || task_name.contains(":test") {
         3
     } else if task_name.contains("dashboard") || task_name.contains("ui") {
         2
@@ -423,7 +432,7 @@ pub fn build_tasks(
                     args,
                     cwd: root_dir.to_path_buf(),
                     color_idx: 0,
-                    estimated_cost: estimate_cost(&gate),
+                    estimated_cost: task_cost(&gate, configured),
                 });
             }
         }
@@ -460,7 +469,7 @@ pub fn build_tasks(
                 args,
                 cwd: pkg.dir.clone(),
                 color_idx: 0,
-                estimated_cost: estimate_cost(&task_name),
+                estimated_cost: task_cost(&task_name, configured),
             });
         }
     }
@@ -708,6 +717,42 @@ mod tests {
             task_names(&check_tasks),
             vec!["lint", "typecheck", "test", "@w/app:check"]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configured_cost_outranks_the_name_heuristic() {
+        let dir = js_workspace(
+            "fanout-test-ws-cost",
+            &["lint", "test", "seed:check"],
+            &["test"],
+            Some(
+                r#"{
+                    "targets": {
+                        "check": {
+                            "root": ["lint", "test", "seed:check"],
+                            "package": "test",
+                            "cost": { "seed:check": 5 }
+                        }
+                    }
+                }"#,
+            ),
+        );
+
+        let (tasks, _) = build_tasks(&Options::default(), &dir).unwrap();
+        let cost = |name: &str| {
+            tasks
+                .iter()
+                .find(|t| t.name == name)
+                .map(|t| t.estimated_cost)
+                .unwrap()
+        };
+
+        assert_eq!(cost("seed:check"), 5);
+        assert_eq!(cost("test"), 3);
+        // Package test tasks rank as heavy too, not only root `test*`.
+        assert_eq!(cost("@w/app:test"), 3);
+        assert_eq!(cost("lint"), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 

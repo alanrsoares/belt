@@ -94,6 +94,14 @@ root:
 with no entry keeps the conventions. `fanout <target> --dry-run` prints the
 resolved list without running it — the quickest way to confirm a config.
 
+Ready tasks start longest-first. Names containing `test` rank as heavy; a long
+task named anything else gets a `cost` so it does not start behind short ones
+(`test*` scores 3, the default is 0):
+
+```json
+{ "targets": { "check:full": { "root": ["…"], "cost": { "seed:check": 5, "bootstrap:self-tsc": 5 } } } }
+```
+
 ## Conventions
 
 * **Edition 2021, `unsafe_code = "forbid"`, `clippy::all = warn`** — enforced
