@@ -373,6 +373,9 @@ mod tests {
         );
     }
 
+    // `/tmp/…` has no drive on Windows, so it is not absolute there; the
+    // Windows form is covered by `file_uri_formats_windows_style_paths`.
+    #[cfg(not(windows))]
     #[test]
     fn file_uri_resolves_absolute_paths_and_encodes_spaces() {
         assert_eq!(
@@ -384,7 +387,7 @@ mod tests {
     #[test]
     fn file_uri_resolves_relative_paths_against_cwd() {
         let cwd = std::env::current_dir().unwrap();
-        let expected = format!("file://{}/out.png", cwd.display());
+        let expected = format!("{}/out.png", file_uri(&cwd));
         assert_eq!(file_uri(std::path::Path::new("out.png")), expected);
     }
 
