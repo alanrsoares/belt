@@ -17,7 +17,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TOOLS: "scaffold portkill jwt devclean fanout webdriver"
@@ -48,11 +48,14 @@ jobs:
         run: |
           set -eu
           stage="$(mktemp -d)"
+          bins=()
           for tool in $TOOLS; do
-            cp "target/release/${tool}${{ matrix.ext }}" "$stage/${tool}${{ matrix.ext }}"
+            bin="${tool}${{ matrix.ext }}"
+            cp "target/release/${bin}" "$stage/${bin}"
+            bins+=("${bin}")
           done
           name="belt-${{ matrix.target }}.tar.gz"
-          tar -czf "$name" -C "$stage" .
+          tar -czf "$name" -C "$stage" "${bins[@]}"
           if command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "$name" > "$name.sha256"
           else
@@ -69,6 +72,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
