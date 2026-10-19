@@ -124,13 +124,14 @@ impl Lang {
 
 impl fmt::Display for Lang {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Lang::Ts => write!(f, "ts"),
-            Lang::Rust => write!(f, "rust"),
-            Lang::Go => write!(f, "go"),
-            Lang::Py => write!(f, "py"),
-            Lang::DotNet => write!(f, "dotnet"),
-        }
+        let s = match self {
+            Lang::Ts => "ts",
+            Lang::Rust => "rust",
+            Lang::Go => "go",
+            Lang::Py => "py",
+            Lang::DotNet => "dotnet",
+        };
+        f.pad(s)
     }
 }
 
@@ -140,7 +141,7 @@ impl fmt::Display for Lang {
 /// directory; spaces and other non-identifier chars become hyphens and
 /// consecutive hyphens are collapsed. The always-valid `app` is used when the
 /// sanitized result is empty.
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     if name.trim().is_empty() || name.contains('/') || name.contains('\\') {
         return "app".to_string();
     }

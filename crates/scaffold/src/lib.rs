@@ -59,12 +59,14 @@ fn list_projects(c: &Colour, out: &mut impl Write) {
         } else {
             c.yellow("v2")
         };
+        let padded_name = format!("{:<6}", lang);
         let name = if lang.supported() {
-            c.cyan(lang.to_string())
+            c.cyan(padded_name)
         } else {
-            c.yellow(lang.to_string())
+            c.yellow(padded_name)
         };
-        let _ = writeln!(out, "    {name:<6}    {}    {status}", c.bold(lang.label()));
+        let padded_label = format!("{:<28}", lang.label());
+        let _ = writeln!(out, "    {name}    {}    {status}", c.bold(padded_label));
     }
 }
 
@@ -80,10 +82,23 @@ fn run_scaffold(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
         }
     };
 
-    let name = p
+    let raw_name = p
         .name
         .clone()
         .unwrap_or_else(|| lang.default_name().to_string());
+
+    let trimmed = raw_name.trim();
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || raw_name.contains('/')
+        || raw_name.contains('\\')
+    {
+        let _ = writeln!(out, "{} invalid project name: {raw_name}", c.red("error:"));
+        return 1;
+    }
+
+    let name = templates::sanitize_name(&raw_name);
 
     // V1 does not yet wire a shell-out for .NET (`dotnet new`).
     if !lang.supported() {
@@ -213,12 +228,13 @@ fn unix_secs() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .map(|s| s.to_string())
-        .unwrap_or_default()
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use local_common::strip_ansi;
 
     #[test]
     fn run_help_and_version_actions_succeed() {
@@ -250,6 +266,80 @@ mod tests {
         ]);
         assert_eq!(code, 0);
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn run_rejects_path_traversal_and_invalid_names() {
+        let tmp = std::env::temp_dir().join("scaffold-test-traversal");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        for bad in ["../evil", r"..\evil", "/tmp/evil", ".", "..", "a/b"] {
+            let mut out = Vec::new();
+            let p = Parsed {
+                action: Action::Scaffold,
+                lang: Some(Lang::Ts),
+                name: Some(bad.to_string()),
+                path: tmp.clone(),
+                no_log: true,
+                ..Default::default()
+            };
+            let code = run_scaffold(&p, &Colour::new(false), &mut out);
+            assert_eq!(code, 1, "expected failure for name {bad:?}");
+            let msg = String::from_utf8(out).unwrap();
+            assert!(
+                msg.contains("invalid project name:"),
+                "unexpected msg: {msg}"
+            );
+        }
+
+        // Also ensure spaces in project name create sanitized directory matching rendered package name
+        let mut out = Vec::new();
+        let p = Parsed {
+            action: Action::Scaffold,
+            lang: Some(Lang::Ts),
+            name: Some("my cool app".to_string()),
+            path: tmp.clone(),
+            no_log: true,
+            ..Default::default()
+        };
+        assert_eq!(run_scaffold(&p, &Colour::new(false), &mut out), 0);
+        assert!(tmp.join("my-cool-app").join("package.json").is_file());
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn list_projects_aligns_columns_with_ansi_colours() {
+        let mut out_col = Vec::new();
+        let mut out_plain = Vec::new();
+        list_projects(&Colour::new(true), &mut out_col);
+        list_projects(&Colour::new(false), &mut out_plain);
+
+        let text_col = strip_ansi(&String::from_utf8(out_col).unwrap());
+        let text_plain = String::from_utf8(out_plain).unwrap();
+        assert_eq!(text_col, text_plain);
+
+        let lines: Vec<&str> = text_col.lines().skip(1).collect();
+        assert_eq!(lines.len(), Lang::all().len());
+
+        // Every row should have status column starting at the exact same column offset
+        let status_cols: Vec<usize> = lines
+            .iter()
+            .map(|l| {
+                l.rfind("ready")
+                    .or_else(|| l.rfind("v2"))
+                    .expect("missing status")
+            })
+            .collect();
+        for col in &status_cols {
+            assert_eq!(
+                *col,
+                status_cols[0],
+                "misaligned status columns in:\n{}",
+                lines.join("\n")
+            );
+        }
     }
 
     #[test]
