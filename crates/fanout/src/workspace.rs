@@ -21,6 +21,8 @@ pub struct WorkspacePkg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskSpec {
     pub name: String,
+    pub pkg_name: Option<String>,
+    pub script_name: String,
     pub runner_bin: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
@@ -428,6 +430,8 @@ pub fn build_tasks(
                 args.extend(opts.passthrough_args.clone());
                 task_specs.push(TaskSpec {
                     name: gate.clone(),
+                    pkg_name: None,
+                    script_name: gate.clone(),
                     runner_bin: runner_bin.clone(),
                     args,
                     cwd: root_dir.to_path_buf(),
@@ -465,6 +469,8 @@ pub fn build_tasks(
 
             task_specs.push(TaskSpec {
                 name: task_name.clone(),
+                pkg_name: Some(pkg.name.clone()),
+                script_name: script_for_pkgs.clone(),
                 runner_bin: runner_bin.clone(),
                 args,
                 cwd: pkg.dir.clone(),
@@ -535,6 +541,8 @@ fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, S
             full_args.extend(opts.passthrough_args.clone());
             task_specs.push(TaskSpec {
                 name: name.to_string(),
+                pkg_name: None,
+                script_name: name.to_string(),
                 runner_bin: "cargo".to_string(),
                 args: full_args,
                 cwd: root_dir.to_path_buf(),

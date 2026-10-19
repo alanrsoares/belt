@@ -33,6 +33,7 @@ impl TaskGraph {
         tasks: Vec<TaskSpec>,
         pkgs: &[WorkspacePkg],
         pipeline: Option<&TurboPipeline>,
+        topological: bool,
     ) -> Result<Self, String> {
         let mut pkg_map: HashMap<&str, &WorkspacePkg> = HashMap::new();
         for pkg in pkgs {
@@ -58,29 +59,31 @@ impl TaskGraph {
 
         // Resolve dependencies
         for i in 0..nodes.len() {
-            let task_name = nodes[i].spec.name.clone();
+            let pkg_name = nodes[i].spec.pkg_name.clone();
+            let script_name = nodes[i].spec.script_name.clone();
 
-            // Check if this task is a package task (e.g. "@scope/pkg:build")
-            let (pkg_name, script_name) = if let Some((pkg, script)) = task_name.split_once(':') {
-                (Some(pkg), script)
+            let mut depends_on_rules = if let Some(rules) =
+                pipeline.and_then(|p| p.task_rules.get(script_name.as_str()))
+            {
+                rules.depends_on.clone()
+            } else if script_name == "build" || topological {
+                // Default heuristic: build tasks (or any task under --topological) depend on upstream packages
+                vec![format!("^{script_name}")]
             } else {
-                (None, task_name.as_str())
+                Vec::new()
             };
 
-            let depends_on_rules =
-                if let Some(rules) = pipeline.and_then(|p| p.task_rules.get(script_name)) {
-                    rules.depends_on.clone()
-                } else if script_name == "build" {
-                    // Default heuristic: build tasks depend on upstream package builds
-                    vec!["^build".to_string()]
-                } else {
-                    Vec::new()
-                };
+            if topological {
+                let topo_rule = format!("^{script_name}");
+                if !depends_on_rules.contains(&topo_rule) {
+                    depends_on_rules.push(topo_rule);
+                }
+            }
 
             for rule in depends_on_rules {
                 if let Some(dep_script) = rule.strip_prefix('^') {
                     // Package dependencies' task (e.g. ^build)
-                    if let Some(pkg) = pkg_name.and_then(|p| pkg_map.get(p)) {
+                    if let Some(pkg) = pkg_name.as_deref().and_then(|p| pkg_map.get(p)) {
                         for internal_dep in &pkg.internal_deps {
                             let dep_task_name = format!("{internal_dep}:{dep_script}");
                             if let Some(&dep_idx) = task_lookup.get(&dep_task_name) {
@@ -89,7 +92,7 @@ impl TaskGraph {
                             }
                         }
                     }
-                } else if let Some(pkg) = pkg_name {
+                } else if let Some(ref pkg) = pkg_name {
                     // Same-package task dependency (e.g. "build" before "test")
                     let dep_task_name = format!("{pkg}:{rule}");
                     if let Some(&dep_idx) = task_lookup.get(&dep_task_name) {
@@ -174,6 +177,8 @@ mod tests {
         let tasks = vec![
             TaskSpec {
                 name: "@app/ui:build".into(),
+                pkg_name: Some("@app/ui".into()),
+                script_name: "build".into(),
                 runner_bin: "bun".into(),
                 args: vec!["run".into(), "build".into()],
                 cwd: PathBuf::from("/root/packages/ui"),
@@ -182,6 +187,8 @@ mod tests {
             },
             TaskSpec {
                 name: "@app/core:build".into(),
+                pkg_name: Some("@app/core".into()),
+                script_name: "build".into(),
                 runner_bin: "bun".into(),
                 args: vec!["run".into(), "build".into()],
                 cwd: PathBuf::from("/root/packages/core"),
@@ -190,7 +197,7 @@ mod tests {
             },
         ];
 
-        let graph = TaskGraph::build(tasks, &pkgs, None).expect("DAG build failed");
+        let graph = TaskGraph::build(tasks, &pkgs, None, false).expect("DAG build failed");
 
         // @app/core:build has index 1, @app/ui:build has index 0
         // @app/ui:build should depend on index 1
@@ -199,5 +206,102 @@ mod tests {
 
         // Ready tasks should only be @app/core:build (index 1)
         assert_eq!(graph.ready_tasks(), vec![1]);
+    }
+
+    #[test]
+    fn root_task_with_colon_is_not_misparsed_as_package_task() {
+        let pkgs = vec![WorkspacePkg {
+            name: "fmt".into(),
+            dir: PathBuf::from("/root/packages/fmt"),
+            scripts: vec!["check".into()],
+            internal_deps: vec![],
+        }];
+
+        let mut rules = HashMap::new();
+        rules.insert(
+            "fmt:check".to_string(),
+            PipelineRule {
+                depends_on: vec!["lint".to_string()],
+            },
+        );
+        let pipeline = TurboPipeline { task_rules: rules };
+
+        let tasks = vec![
+            TaskSpec {
+                name: "lint".into(),
+                pkg_name: None,
+                script_name: "lint".into(),
+                runner_bin: "bun".into(),
+                args: vec!["run".into(), "lint".into()],
+                cwd: PathBuf::from("/root"),
+                color_idx: 0,
+                estimated_cost: 0,
+            },
+            TaskSpec {
+                name: "fmt:check".into(),
+                pkg_name: None,
+                script_name: "fmt:check".into(),
+                runner_bin: "bun".into(),
+                args: vec!["run".into(), "fmt:check".into()],
+                cwd: PathBuf::from("/root"),
+                color_idx: 1,
+                estimated_cost: 0,
+            },
+        ];
+
+        let graph =
+            TaskGraph::build(tasks, &pkgs, Some(&pipeline), false).expect("DAG build failed");
+        assert!(graph.nodes[1].depends_on.contains(&0));
+        assert_eq!(graph.ready_tasks(), vec![0]);
+    }
+
+    #[test]
+    fn topological_flag_orders_non_build_scripts_without_turbo_json() {
+        let pkgs = vec![
+            WorkspacePkg {
+                name: "@app/core".into(),
+                dir: PathBuf::from("/root/packages/core"),
+                scripts: vec!["typecheck".into()],
+                internal_deps: vec![],
+            },
+            WorkspacePkg {
+                name: "@app/ui".into(),
+                dir: PathBuf::from("/root/packages/ui"),
+                scripts: vec!["typecheck".into()],
+                internal_deps: vec!["@app/core".into()],
+            },
+        ];
+
+        let tasks = vec![
+            TaskSpec {
+                name: "@app/ui:typecheck".into(),
+                pkg_name: Some("@app/ui".into()),
+                script_name: "typecheck".into(),
+                runner_bin: "bun".into(),
+                args: vec!["run".into(), "typecheck".into()],
+                cwd: PathBuf::from("/root/packages/ui"),
+                color_idx: 0,
+                estimated_cost: 1,
+            },
+            TaskSpec {
+                name: "@app/core:typecheck".into(),
+                pkg_name: Some("@app/core".into()),
+                script_name: "typecheck".into(),
+                runner_bin: "bun".into(),
+                args: vec!["run".into(), "typecheck".into()],
+                cwd: PathBuf::from("/root/packages/core"),
+                color_idx: 1,
+                estimated_cost: 1,
+            },
+        ];
+
+        // Without --topological, typecheck tasks run in parallel
+        let flat = TaskGraph::build(tasks.clone(), &pkgs, None, false).unwrap();
+        assert_eq!(flat.ready_tasks(), vec![0, 1]);
+
+        // With --topological, @app/ui:typecheck waits for @app/core:typecheck
+        let topo = TaskGraph::build(tasks, &pkgs, None, true).unwrap();
+        assert!(topo.nodes[0].depends_on.contains(&1));
+        assert_eq!(topo.ready_tasks(), vec![1]);
     }
 }

@@ -8,6 +8,7 @@ use crate::workspace::WorkspacePkg;
 
 const ROOT_CONFIG_FILES: &[&str] = &[
     "package.json",
+    "fanout.json",
     "pnpm-lock.yaml",
     "bun.lock",
     "bun.lockb",
@@ -26,27 +27,34 @@ const ROOT_CONFIG_FILES: &[&str] = &[
 
 /// Query git for files modified since a given git ref, plus staged/unstaged/untracked changes.
 pub fn find_changed_files(root_dir: &Path, since_ref: &str) -> Result<Vec<PathBuf>, String> {
+    if since_ref.starts_with('-') {
+        return Err(format!("invalid git ref '{since_ref}'"));
+    }
+
     let mut files = HashSet::new();
 
     // 1. Commits diff against since_ref
     let diff_target = format!("{since_ref}...HEAD");
-    if let Ok(output) = Command::new("git")
+    let three_dot = Command::new("git")
         .args(["diff", "--name-only", &diff_target])
         .current_dir(root_dir)
-        .output()
-    {
-        if output.status.success() {
+        .output();
+
+    match three_dot {
+        Ok(output) if output.status.success() => {
             parse_git_lines(&output.stdout, &mut files);
-        } else {
+        }
+        _ => {
             // Fallback to direct two-dot diff or single ref if 3-dot fails
-            if let Ok(fallback) = Command::new("git")
+            let fallback = Command::new("git")
                 .args(["diff", "--name-only", since_ref])
                 .current_dir(root_dir)
                 .output()
-            {
-                if fallback.status.success() {
-                    parse_git_lines(&fallback.stdout, &mut files);
-                }
+                .map_err(|e| format!("failed to run git diff: {e}"))?;
+            if fallback.status.success() {
+                parse_git_lines(&fallback.stdout, &mut files);
+            } else {
+                return Err(format!("unknown or invalid git ref '{since_ref}'"));
             }
         }
     }
@@ -197,6 +205,11 @@ mod tests {
         let changed = vec![PathBuf::from("package.json")];
         let affected = resolve_affected_packages(&pkgs, &changed, Path::new("/root"), true);
         assert_eq!(affected.len(), 2);
+
+        let fanout_changed = vec![PathBuf::from("fanout.json")];
+        let fanout_affected =
+            resolve_affected_packages(&pkgs, &fanout_changed, Path::new("/root"), true);
+        assert_eq!(fanout_affected.len(), 2);
     }
 
     #[test]
@@ -231,5 +244,18 @@ mod tests {
         // With dependents: @app/core and @app/ui (docs is unaffected)
         let with_deps = resolve_affected_packages(&pkgs, &changed, Path::new("/root"), true);
         assert_eq!(with_deps, vec!["@app/core", "@app/ui"]);
+    }
+
+    #[test]
+    fn find_changed_files_rejects_flag_refs_and_unknown_refs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let err_flag = find_changed_files(root, "--output=/tmp/pwn").unwrap_err();
+        assert_eq!(err_flag, "invalid git ref '--output=/tmp/pwn'");
+
+        let err_unknown = find_changed_files(root, "nonexistent-ref-0000000000000000").unwrap_err();
+        assert_eq!(
+            err_unknown,
+            "unknown or invalid git ref 'nonexistent-ref-0000000000000000'"
+        );
     }
 }

@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -76,6 +76,7 @@ struct SchedulerState {
     queue: VecDeque<usize>,
     in_degrees: Vec<usize>,
     completed: usize,
+    active_workers: usize,
     bail: bool,
 }
 
@@ -121,7 +122,7 @@ pub fn execute_tasks(
     }
 
     // Build task dependency graph
-    let graph = match TaskGraph::build(tasks.clone(), &pkgs, pipeline.as_ref()) {
+    let graph = match TaskGraph::build(tasks.clone(), &pkgs, pipeline.as_ref(), opts.topological) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("fanout: {e}");
@@ -131,7 +132,6 @@ pub fn execute_tasks(
 
     let (tx, rx): (Sender<Event>, Receiver<Event>) = mpsc::channel();
     let bail_flag = Arc::new(AtomicBool::new(false));
-    let active_workers = Arc::new(AtomicUsize::new(0));
 
     // Initialize scheduler with in-degrees and ready tasks (in-degree == 0)
     let in_degrees: Vec<usize> = graph.nodes.iter().map(|n| n.depends_on.len()).collect();
@@ -145,6 +145,7 @@ pub fn execute_tasks(
             queue: VecDeque::from(ready_tasks),
             in_degrees,
             completed: 0,
+            active_workers: 0,
             bail: false,
         }),
         Condvar::new(),
@@ -159,7 +160,6 @@ pub fn execute_tasks(
         let graph_ref = graph.clone();
         let tx_clone = tx.clone();
         let bail_ref = Arc::clone(&bail_flag);
-        let active = Arc::clone(&active_workers);
         let timeout_ms = opts.timeout_ms;
         let tail_cap = opts.tail_lines;
         let bail_on_fail = opts.bail;
@@ -169,10 +169,7 @@ pub fn execute_tasks(
             let (lock, cvar) = &*sched;
 
             let next_idx = {
-                let mut state = match lock.lock() {
-                    Ok(l) => l,
-                    Err(p) => p.into_inner(),
-                };
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
 
                 loop {
                     if state.bail || state.completed >= num_tasks || bail_ref.load(Ordering::SeqCst)
@@ -181,10 +178,11 @@ pub fn execute_tasks(
                     }
 
                     if let Some(idx) = state.queue.pop_front() {
+                        state.active_workers += 1;
                         break idx;
                     }
 
-                    if active.load(Ordering::SeqCst) == 0 && state.queue.is_empty() {
+                    if state.active_workers == 0 && state.queue.is_empty() {
                         // Deadlock prevention / unreachable remaining tasks
                         return;
                     }
@@ -197,7 +195,6 @@ pub fn execute_tasks(
                 }
             };
 
-            active.fetch_add(1, Ordering::SeqCst);
             let _ = tx_clone.send(Event::TaskStarted { index: next_idx });
 
             let spec = &tasks_ref[next_idx];
@@ -208,33 +205,6 @@ pub fn execute_tasks(
             );
 
             let duration = task_start.elapsed();
-            active.fetch_sub(1, Ordering::SeqCst);
-
-            // Update DAG and unlock dependents
-            {
-                let mut state = match lock.lock() {
-                    Ok(l) => l,
-                    Err(p) => p.into_inner(),
-                };
-                state.completed += 1;
-
-                if outcome.is_bad() && bail_on_fail {
-                    state.bail = true;
-                    bail_ref.store(true, Ordering::SeqCst);
-                } else if outcome == Outcome::Passed {
-                    // Unlock dependents whose prerequisites have all passed
-                    for &dep_idx in &graph_ref.nodes[next_idx].dependents {
-                        if state.in_degrees[dep_idx] > 0 {
-                            state.in_degrees[dep_idx] -= 1;
-                            if state.in_degrees[dep_idx] == 0 {
-                                state.queue.push_back(dep_idx);
-                            }
-                        }
-                    }
-                }
-
-                cvar.notify_all();
-            }
 
             let _ = tx_clone.send(Event::TaskFinished {
                 index: next_idx,
@@ -243,6 +213,39 @@ pub fn execute_tasks(
                 exit_code,
                 tail,
             });
+
+            // Update DAG and unlock dependents
+            {
+                let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+                state.completed += 1;
+
+                if outcome.is_bad() && bail_on_fail {
+                    state.bail = true;
+                    bail_ref.store(true, Ordering::SeqCst);
+                } else if outcome == Outcome::Passed {
+                    // Unlock dependents whose prerequisites have all passed
+                    let mut newly_unlocked: Vec<usize> = Vec::new();
+                    for &dep_idx in &graph_ref.nodes[next_idx].dependents {
+                        if state.in_degrees[dep_idx] > 0 {
+                            state.in_degrees[dep_idx] -= 1;
+                            if state.in_degrees[dep_idx] == 0 {
+                                newly_unlocked.push(dep_idx);
+                            }
+                        }
+                    }
+                    newly_unlocked.sort_by(|&a, &b| {
+                        tasks_ref[b]
+                            .estimated_cost
+                            .cmp(&tasks_ref[a].estimated_cost)
+                    });
+                    for dep_idx in newly_unlocked {
+                        state.queue.push_back(dep_idx);
+                    }
+                }
+
+                state.active_workers -= 1;
+                cvar.notify_all();
+            }
         });
 
         worker_handles.push(handle);
@@ -269,8 +272,17 @@ pub fn execute_tasks(
     loop {
         let mut state_changed = false;
         let mut has_output = false;
+        let mut disconnected = false;
 
-        while let Ok(event) = rx.try_recv() {
+        loop {
+            let event = match rx.try_recv() {
+                Ok(ev) => ev,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            };
             match event {
                 Event::TaskStarted { index } => {
                     states[index].phase = Outcome::Running;
@@ -372,15 +384,15 @@ pub fn execute_tasks(
 
         // Check completion
         let settled_count = states.iter().filter(|st| st.phase.is_settled()).count();
-        if settled_count == num_tasks {
+        if settled_count == num_tasks || disconnected {
             break;
         }
 
-        // Check if all workers exited (e.g. on bail or deadlock)
-        if active_workers.load(Ordering::SeqCst) == 0 {
-            let sched_lock = scheduler.0.lock().unwrap();
-            if sched_lock.queue.is_empty() {
-                break;
+        // Wake any waiting workers if all active work and queue items are exhausted
+        {
+            let sched_lock = scheduler.0.lock().unwrap_or_else(|e| e.into_inner());
+            if sched_lock.active_workers == 0 && sched_lock.queue.is_empty() {
+                scheduler.1.notify_all();
             }
         }
 
@@ -407,6 +419,11 @@ pub fn execute_tasks(
                 duration: Duration::ZERO,
                 color_idx: spec.color_idx,
             });
+            if mode == Mode::Report {
+                let block =
+                    report::settled(&spec.name, Outcome::Cancelled, 0, Duration::ZERO, &[], 0);
+                let _ = out.write_all(block.as_bytes());
+            }
         }
     }
 
@@ -770,11 +787,7 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
         .filter(|r| r.outcome == Outcome::Cancelled)
         .count();
 
-    let mut failed_names = String::new();
-    for r in &failed {
-        failed_names.push_str(", ");
-        failed_names.push_str(&r.name);
-    }
+    let failed_names = format_failed_names(&failed);
 
     for r in &ranked {
         let color = s.task_color(r.color_idx);
@@ -854,7 +867,7 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
                 s.red(),
                 s.reset(),
                 s.gray(),
-                &failed_names[3..],
+                failed_names,
                 s.reset()
             );
         }
@@ -876,6 +889,14 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
     }
 
     println!();
+}
+
+fn format_failed_names(failed: &[&TaskResult]) -> String {
+    failed
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 trait PadExt {
@@ -919,5 +940,23 @@ mod tests {
             assert_eq!(resolve_runner_bin("npm.cmd"), "npm.cmd");
             assert_eq!(resolve_runner_bin("cargo.exe"), "cargo.exe");
         }
+    }
+
+    #[test]
+    fn format_failed_names_preserves_first_char_and_utf8() {
+        let r1 = TaskResult {
+            name: "lint".to_string(),
+            outcome: Outcome::Failed(1),
+            duration: Duration::from_millis(10),
+            color_idx: 0,
+        };
+        let r2 = TaskResult {
+            name: "⚡build".to_string(),
+            outcome: Outcome::Timeout,
+            duration: Duration::from_millis(20),
+            color_idx: 1,
+        };
+        assert_eq!(format_failed_names(&[&r1, &r2]), "lint, ⚡build");
+        assert_eq!(format_failed_names(&[&r2]), "⚡build");
     }
 }
