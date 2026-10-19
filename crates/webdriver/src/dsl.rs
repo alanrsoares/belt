@@ -168,6 +168,10 @@ pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
         }
     }
 
+    if escape {
+        current.push('\\');
+    }
+
     if in_quote.is_some() {
         return Err("unclosed quote in line".to_string());
     }
@@ -251,11 +255,13 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 let mut timeout_ms = default_timeout_ms;
                 if idx < tokens.len() {
                     if tokens[idx] == "--timeout" || tokens[idx] == "-t" {
+                        let flag = &tokens[idx];
                         idx += 1;
-                        if idx < tokens.len() {
-                            timeout_ms = parse_duration_ms(&tokens[idx])?;
-                            idx += 1;
+                        if idx >= tokens.len() {
+                            return Err(format!("'{flag}' requires a duration argument"));
                         }
+                        timeout_ms = parse_duration_ms(&tokens[idx])?;
+                        idx += 1;
                     } else if let Ok(d) = parse_duration_ms(&tokens[idx]) {
                         timeout_ms = d;
                         idx += 1;
@@ -319,11 +325,13 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                         full_page = true;
                         idx += 1;
                     } else if tokens[idx] == "--selector" || tokens[idx] == "-s" {
+                        let flag = &tokens[idx];
                         idx += 1;
-                        if idx < tokens.len() {
-                            selector = Some(tokens[idx].clone());
-                            idx += 1;
+                        if idx >= tokens.len() {
+                            return Err(format!("'{flag}' requires a selector argument"));
                         }
+                        selector = Some(tokens[idx].clone());
+                        idx += 1;
                     } else if !tokens[idx].starts_with('-')
                         && (tokens[idx].ends_with(".png")
                             || tokens[idx].ends_with(".jpg")
@@ -815,5 +823,37 @@ mod tests {
         assert!(parse_tokens(&["wait-for".to_string()], 30_000).is_err());
         assert!(parse_tokens(&["viewport".to_string()], 30_000).is_err());
         assert!(parse_tokens(&["invalid_verb".to_string()], 30_000).is_err());
+    }
+
+    #[test]
+    fn dangling_timeout_and_selector_flags_error() {
+        assert!(parse_tokens(
+            &[
+                "wait-for".to_string(),
+                "#el".to_string(),
+                "--timeout".to_string()
+            ],
+            30_000
+        )
+        .is_err());
+        assert!(parse_tokens(
+            &["wait-for".to_string(), "#el".to_string(), "-t".to_string()],
+            30_000
+        )
+        .is_err());
+        assert!(parse_tokens(
+            &["screenshot".to_string(), "--selector".to_string()],
+            30_000
+        )
+        .is_err());
+        assert!(parse_tokens(&["screenshot".to_string(), "-s".to_string()], 30_000).is_err());
+    }
+
+    #[test]
+    fn tokenize_line_preserves_trailing_backslash() {
+        assert_eq!(
+            tokenize_line(r"eval foo\").unwrap(),
+            vec!["eval".to_string(), r"foo\".to_string()]
+        );
     }
 }

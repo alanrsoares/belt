@@ -62,6 +62,10 @@ impl WebSocketClient {
             }
         }
 
+        if !header_buf.ends_with(b"\r\n\r\n") {
+            return Err("websocket handshake headers exceeded 8192 bytes".to_string());
+        }
+
         let resp_str = String::from_utf8_lossy(&header_buf);
         if !resp_str.starts_with("HTTP/1.1 101") && !resp_str.starts_with("HTTP/1.0 101") {
             return Err(format!("invalid websocket handshake response: {resp_str}"));
@@ -109,6 +113,7 @@ impl WebSocketClient {
     }
 
     pub fn read_text(&mut self) -> Result<String, String> {
+        const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
         let mut full_payload = Vec::new();
 
         loop {
@@ -135,8 +140,15 @@ impl WebSocketClient {
                 self.stream
                     .read_exact(&mut b)
                     .map_err(|e| format!("failed to read 64-bit length: {e}"))?;
-                u64::from_be_bytes(b) as usize
+                usize::try_from(u64::from_be_bytes(b))
+                    .map_err(|_| "websocket frame length overflows usize".to_string())?
             };
+
+            if len > MAX_FRAME_LEN {
+                return Err(format!(
+                    "websocket frame length {len} exceeds maximum allowed ({MAX_FRAME_LEN} bytes)"
+                ));
+            }
 
             let mask_key = if masked {
                 let mut m = [0u8; 4];
@@ -174,12 +186,13 @@ impl WebSocketClient {
                 }
                 // Ping frame -> send Pong
                 0x9 => {
-                    let mut pong = Vec::with_capacity(payload.len() + 6);
+                    let pong_payload = &payload[..payload.len().min(125)];
+                    let mut pong = Vec::with_capacity(pong_payload.len() + 6);
                     pong.push(0x8A); // FIN | Pong
-                    pong.push(0x80 | (payload.len() as u8).min(125));
+                    pong.push(0x80 | (pong_payload.len() as u8));
                     let pmask = [0x00, 0x00, 0x00, 0x00];
                     pong.extend_from_slice(&pmask);
-                    pong.extend_from_slice(&payload);
+                    pong.extend_from_slice(pong_payload);
                     let _ = self.stream.write_all(&pong);
                     let _ = self.stream.flush();
                     continue;
@@ -233,6 +246,7 @@ pub struct SnapshotNode {
 pub struct CdpSession {
     ws: WebSocketClient,
     next_id: u64,
+    default_timeout_ms: u64,
     console: Vec<ConsoleEntry>,
     contexts: Vec<ExecutionContext>,
     /// Frame the next command targets; `None` means the top frame.
@@ -246,11 +260,16 @@ impl CdpSession {
         Self {
             ws,
             next_id: 1,
+            default_timeout_ms: 30_000,
             console: Vec::new(),
             contexts: Vec::new(),
             target_frame: None,
             refs: HashMap::new(),
         }
+    }
+
+    pub fn set_default_timeout(&mut self, timeout_ms: u64) {
+        self.default_timeout_ms = timeout_ms;
     }
 
     /// Console entries captured so far, oldest first.
@@ -575,7 +594,12 @@ impl CdpSession {
                 Ok(Some(object_id)) => {
                     let visible = self.call_on(
                         &object_id,
-                        "function() { return window.__wd ? window.__wd.visible(this) : !!this.getClientRects().length; }",
+                        r#"function() {
+                            if (window.__wd) return window.__wd.visible(this);
+                            if (!this || !this.getClientRects().length) return false;
+                            const s = getComputedStyle(this);
+                            return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;
+                        }"#,
                     );
                     match visible {
                         Ok(JsonValue::Bool(true)) => return Ok(object_id),
@@ -606,6 +630,12 @@ impl CdpSession {
             "backendNodeId".to_string(),
             JsonValue::Number(backend_node_id as f64),
         );
+        if let Some(context_id) = self.target_context_id()? {
+            params.insert(
+                "executionContextId".to_string(),
+                JsonValue::Number(context_id as f64),
+            );
+        }
 
         let resp = self
             .call("DOM.resolveNode", JsonValue::Object(params))
@@ -755,15 +785,15 @@ impl CdpSession {
 
     /// Send a key chord such as `Enter`, `Escape` or `Meta+O` to the focused element.
     pub fn press(&mut self, chord: &str) -> Result<(), String> {
-        let mut modifiers = 0f64;
+        let mut modifiers = 0u8;
         let mut key_part = chord;
 
         for part in chord.split('+') {
             match part.to_ascii_lowercase().as_str() {
-                "alt" | "option" => modifiers += 1.0,
-                "ctrl" | "control" => modifiers += 2.0,
-                "meta" | "cmd" | "command" => modifiers += 4.0,
-                "shift" => modifiers += 8.0,
+                "alt" | "option" => modifiers |= 1,
+                "ctrl" | "control" => modifiers |= 2,
+                "meta" | "cmd" | "command" => modifiers |= 4,
+                "shift" => modifiers |= 8,
                 _ => key_part = part,
             }
         }
@@ -777,8 +807,11 @@ impl CdpSession {
             params.insert("code".to_string(), JsonValue::String(code.clone()));
             params.insert("windowsVirtualKeyCode".to_string(), JsonValue::Number(vk));
             params.insert("nativeVirtualKeyCode".to_string(), JsonValue::Number(vk));
-            params.insert("modifiers".to_string(), JsonValue::Number(modifiers));
-            if event == "keyDown" {
+            params.insert(
+                "modifiers".to_string(),
+                JsonValue::Number(f64::from(modifiers)),
+            );
+            if event == "keyDown" && (modifiers & (1 | 2 | 4) == 0) {
                 if let Some(ref t) = text {
                     params.insert("text".to_string(), JsonValue::String(t.clone()));
                 }
@@ -876,13 +909,13 @@ impl CdpSession {
         params.insert("format".to_string(), JsonValue::String("png".to_string()));
 
         if let Some(sel) = selector {
-            let object_id = self.resolve(sel, 5_000)?;
+            let object_id = self.resolve(sel, self.default_timeout_ms)?;
             let clip_val = self.call_on(
                 &object_id,
                 r#"function() {
                     this.scrollIntoView({ block: "center", inline: "center" });
                     const r = this.getBoundingClientRect();
-                    return { x: r.left, y: r.top, width: r.width, height: r.height };
+                    return { x: r.left + window.scrollX, y: r.top + window.scrollY, width: r.width, height: r.height };
                 }"#,
             );
             self.release(&object_id);
@@ -1202,4 +1235,105 @@ fn truncate_middle(s: &str, limit: usize) -> String {
         .skip(s.chars().count().saturating_sub(limit / 2))
         .collect();
     format!("{head}…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn handshake_rejects_oversized_headers_without_crlf_terminator() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 256];
+            let _ = sock.read(&mut req);
+            // Send 101 status line followed by >8192 bytes without \r\n\r\n
+            let mut resp = b"HTTP/1.1 101 Switching Protocols\r\nX-Pad: ".to_vec();
+            resp.resize(9000, b'a');
+            let _ = sock.write_all(&resp);
+        });
+
+        let res = WebSocketClient::connect("127.0.0.1", port, "/devtools/page/1");
+        assert!(res.is_err());
+        let err = res.err().unwrap();
+        assert!(
+            err.contains("exceeded 8192 bytes"),
+            "unexpected error: {err}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn read_text_replies_to_ping_with_capped_pong_and_returns_text_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 512];
+            let _ = sock.read(&mut req);
+            sock.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .unwrap();
+
+            // Send a Ping frame with 130 bytes (16-bit length = 126)
+            let ping_payload = vec![b'p'; 130];
+            let mut ping_frame = vec![0x89, 126];
+            ping_frame.extend_from_slice(&(130u16).to_be_bytes());
+            ping_frame.extend_from_slice(&ping_payload);
+            sock.write_all(&ping_frame).unwrap();
+
+            // Read the client's Pong frame and verify header length matches payload bytes (125)
+            let mut pong_hdr = [0u8; 2];
+            sock.read_exact(&mut pong_hdr).unwrap();
+            assert_eq!(pong_hdr[0], 0x8A);
+            assert_eq!(pong_hdr[1] & 0x80, 0x80);
+            let pong_len = (pong_hdr[1] & 0x7f) as usize;
+            assert_eq!(pong_len, 125);
+            let mut mask_and_body = vec![0u8; 4 + pong_len];
+            sock.read_exact(&mut mask_and_body).unwrap();
+            assert_eq!(&mask_and_body[4..], &vec![b'p'; 125][..]);
+
+            // Now send a text frame "hello"
+            let text_frame = [0x81, 5, b'h', b'e', b'l', b'l', b'o'];
+            sock.write_all(&text_frame).unwrap();
+        });
+
+        let mut client = WebSocketClient::connect("127.0.0.1", port, "/devtools/page/1").unwrap();
+        let msg = client.read_text().unwrap();
+        assert_eq!(msg, "hello");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn read_text_rejects_oversized_64bit_frame_before_allocating() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 512];
+            let _ = sock.read(&mut req);
+            sock.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .unwrap();
+
+            // Send a header claiming 512 MiB payload
+            let mut frame = vec![0x81, 127];
+            frame.extend_from_slice(&((512u64 * 1024 * 1024).to_be_bytes()));
+            sock.write_all(&frame).unwrap();
+        });
+
+        let mut client = WebSocketClient::connect("127.0.0.1", port, "/devtools/page/1").unwrap();
+        let err = client.read_text().unwrap_err();
+        assert!(err.contains("exceeds maximum allowed"), "got: {err}");
+        server.join().unwrap();
+    }
 }

@@ -1,7 +1,9 @@
 //! Command-line argument parsing, persistent sessions, and help definitions.
 
 use crate::dsl::{self, Step};
+use local_common::term::Colour;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -166,21 +168,22 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> 
     }))
 }
 
-pub fn print_help() {
-    println!(
-        "\x1b[1;36mwebdriver\x1b[0m — fast, zero-dependency browser automation & persistent session CLI
+pub fn print_help(out: &mut impl Write, c: &Colour) {
+    let _ = writeln!(
+        out,
+        "{} — fast, zero-dependency browser automation & persistent session CLI
 
-\x1b[1mUSAGE:\x1b[0m
+{}
     webdriver [OPTIONS] <URL> [VERBS...]
     webdriver --session <NAME> <URL> [VERBS...]
     webdriver [OPTIONS] -f script.wd
     webdriver [OPTIONS] --repl        # one command per stdin line, browser stays open
 
-\x1b[1mOUTPUT:\x1b[0m
+{}
     One line per step: 'ok', 'ok <payload>', 'warn <detail>' or 'err <message>'.
     Colour is off whenever stdout is not a TTY. Exit code is 1 if any step failed.
 
-\x1b[1mPERSISTENT AUTH & SESSIONS:\x1b[0m
+{}
     # Hop 1: Authenticate and store cookies/localStorage in 'my-app' session profile
     webdriver --session my-app http://localhost:3000/login fill '#user' 'admin' fill '#pass' 'sec' click '#submit' wait-for '.dashboard'
 
@@ -191,40 +194,40 @@ pub fn print_help() {
     webdriver --list-sessions
     webdriver --clear-session my-app
 
-\x1b[1mLOCATORS\x1b[0m (anywhere a selector is accepted):
-    \x1b[1;33mtext=\x1b[0mSome label          Innermost element containing the text
-    \x1b[1;33mrole=\x1b[0mbutton:Save         ARIA role + accessible name
-    \x1b[1;33msel=\x1b[0m<css> or bare CSS    CSS selector
-    \x1b[1;33mref=\x1b[0me7                    Handle from the last snapshot (names come from Chrome)
+{} (anywhere a selector is accepted):
+    {}Some label          Innermost element containing the text
+    {}button:Save         ARIA role + accessible name
+    {}<css> or bare CSS    CSS selector
+    {}e7                    Handle from the last snapshot (names come from Chrome)
 
     Actions retry until the element is present and visible, up to --timeout, so a
     wait-for before every click is unnecessary. Clicks and typing go through real
     browser input events.
 
-\x1b[1mVERBS & ACTIONS:\x1b[0m
-    \x1b[1;33mgoto\x1b[0m <url>                     Navigate to URL (default for initial URL)
-    \x1b[1;33mreload\x1b[0m                         Reload current page
-    \x1b[1;33mviewport\x1b[0m <w> <h>               Set window size (e.g. 1280 800 or 1280x800)
-    \x1b[1;33mwait-for\x1b[0m <loc> [timeout]       Wait until element is visible AND painted
-    \x1b[1;33mwait-for-url\x1b[0m <substr> [t]      Wait until URL contains substring (redirects)
-    \x1b[1;33mwait-for-hydration\x1b[0m [quiet]     Wait until DOM stops mutating (default 500ms)
-    \x1b[1;33mwait\x1b[0m <duration>                Fixed sleep (e.g. 500ms, 2s, 1m)
-    \x1b[1;33mclick\x1b[0m <locator>                Click element
-    \x1b[1;33mhover\x1b[0m <locator>                Real mouse move, so CSS :hover applies
-    \x1b[1;33mpress\x1b[0m <key>                    Key chord, e.g. Enter, Escape, Meta+O
-    \x1b[1;33mtype\x1b[0m <loc> <text>              Append text (fires React onChange)
-    \x1b[1;33mfill\x1b[0m <loc> <text>              Clear then type
-    \x1b[1;33meval\x1b[0m <js_expr>                 Evaluate JS, prints JSON result
-    \x1b[1;33murl\x1b[0m / \x1b[1;33mtitle\x1b[0m                   Print current URL / page title
-    \x1b[1;33mconsole\x1b[0m [--errors|--full|--clear]  Buffered console errors, repeats collapsed
-    \x1b[1;33msnapshot\x1b[0m [--all]                 Accessibility tree as 'eN role \"name\"' lines
-    \x1b[1;33mframe\x1b[0m <substr> | --top           Aim later commands at an iframe (URL or name)
-    \x1b[1;33mscreenshot\x1b[0m [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
-    \x1b[1;33mpdf\x1b[0m [path]                     Print page to PDF
-    \x1b[1;33mhtml\x1b[0m [path]                    Dump current HTML to file or stdout
-    \x1b[1;33mclose\x1b[0m                          End the run (useful in --repl)
+{}
+    {} <url>                     Navigate to URL (default for initial URL)
+    {}                         Reload current page
+    {} <w> <h>               Set window size (e.g. 1280 800 or 1280x800)
+    {} <loc> [timeout]       Wait until element is visible AND painted
+    {} <substr> [t]      Wait until URL contains substring (redirects)
+    {} [quiet]     Wait until DOM stops mutating (default 500ms)
+    {} <duration>                Fixed sleep (e.g. 500ms, 2s, 1m)
+    {} <locator>                Click element
+    {} <locator>                Real mouse move, so CSS :hover applies
+    {} <key>                    Key chord, e.g. Enter, Escape, Meta+O
+    {} <loc> <text>              Append text (fires React onChange)
+    {} <loc> <text>              Clear then type
+    {} <js_expr>                 Evaluate JS, prints JSON result
+    {} / {}                   Print current URL / page title
+    {} [--errors|--full|--clear]  Buffered console errors, repeats collapsed
+    {} [--all]                 Accessibility tree as 'eN role \"name\"' lines
+    {} <substr> | --top           Aim later commands at an iframe (URL or name)
+    {} [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
+    {} [path]                     Print page to PDF
+    {} [path]                    Dump current HTML to file or stdout
+    {}                          End the run (useful in --repl)
 
-\x1b[1mOPTIONS:\x1b[0m
+{}
     -s, --session <name>        Persistent session profile name (preserves cookies & storage)
         --user-data-dir <dir>   Custom browser profile data directory
         --list-sessions         List stored persistent session profiles
@@ -241,12 +244,45 @@ pub fn print_help() {
     -q, --quiet                 Print only steps that carry a payload
     -v, --verbose               Step numbers and timings
     -h, --help                  Print help and exit
-    -V, --version               Print version and exit"
+    -V, --version               Print version and exit",
+        c.cyan("webdriver"),
+        c.bold("USAGE:"),
+        c.bold("OUTPUT:"),
+        c.bold("PERSISTENT AUTH & SESSIONS:"),
+        c.bold("LOCATORS"),
+        c.yellow("text="),
+        c.yellow("role="),
+        c.yellow("sel="),
+        c.yellow("ref="),
+        c.bold("VERBS & ACTIONS:"),
+        c.yellow("goto"),
+        c.yellow("reload"),
+        c.yellow("viewport"),
+        c.yellow("wait-for"),
+        c.yellow("wait-for-url"),
+        c.yellow("wait-for-hydration"),
+        c.yellow("wait"),
+        c.yellow("click"),
+        c.yellow("hover"),
+        c.yellow("press"),
+        c.yellow("type"),
+        c.yellow("fill"),
+        c.yellow("eval"),
+        c.yellow("url"),
+        c.yellow("title"),
+        c.yellow("console"),
+        c.yellow("snapshot"),
+        c.yellow("frame"),
+        c.yellow("screenshot"),
+        c.yellow("pdf"),
+        c.yellow("html"),
+        c.yellow("close"),
+        c.bold("OPTIONS:"),
     );
 }
 
-pub fn print_version() {
-    println!("webdriver {}", env!("CARGO_PKG_VERSION"));
+pub fn print_version(out: &mut impl Write) {
+    let _ = writeln!(out, "webdriver {}", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(test)]

@@ -96,23 +96,47 @@ impl BrowserInstance {
                 .stderr
                 .take()
                 .ok_or("failed to capture browser stderr")?;
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::channel::<Result<String, String>>();
 
-            // Read stderr in background to capture DevTools listening port.
+            // Read stderr in background to capture DevTools listening port,
+            // then keep draining so the stderr pipe stays open for the child's lifetime.
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
+                let mut lines = reader.lines();
+                let mut tail: Vec<String> = Vec::new();
+                let mut found = false;
+
+                for line in lines.by_ref().map_while(Result::ok) {
                     if let Some(pos) = line.find("DevTools listening on ws://") {
                         let rest = &line[pos + "DevTools listening on ws://".len()..];
-                        let _ = tx.send(rest.to_string());
+                        let _ = tx.send(Ok(rest.to_string()));
+                        found = true;
                         break;
                     }
+                    if tail.len() >= 10 {
+                        tail.remove(0);
+                    }
+                    tail.push(line);
+                }
+
+                if found {
+                    for _ in lines.map_while(Result::ok) {}
+                } else {
+                    let detail = if tail.is_empty() {
+                        "browser exited before DevTools endpoint was ready".to_string()
+                    } else {
+                        format!(
+                            "browser exited before DevTools endpoint was ready: {}",
+                            tail.join(" | ")
+                        )
+                    };
+                    let _ = tx.send(Err(detail));
                 }
             });
 
             let ws_endpoint = rx
                 .recv_timeout(Duration::from_secs(15))
-                .map_err(|_| "timed out waiting for browser DevTools endpoint".to_string())?;
+                .map_err(|_| "timed out waiting for browser DevTools endpoint".to_string())??;
 
             // Format is e.g. "127.0.0.1:54321/devtools/browser/uuid"
             let parts: Vec<&str> = ws_endpoint.splitn(2, '/').collect();
@@ -266,12 +290,16 @@ fn dir_size(path: &Path) -> u64 {
     let mut total = 0;
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_dir() {
-                    total += dir_size(&entry.path());
-                } else {
-                    total += meta.len();
-                }
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                total += dir_size(&entry.path());
+            } else if let Ok(meta) = entry.metadata() {
+                total += meta.len();
             }
         }
     }
@@ -318,6 +346,10 @@ fn http_request(port: u16, method: &str, path: &str) -> Result<String, String> {
             }
             break;
         }
+    }
+
+    if !buf.ends_with(b"\r\n\r\n") {
+        return Err("incomplete or oversized HTTP response headers".to_string());
     }
 
     // Read body
@@ -485,7 +517,7 @@ pub fn find_browser(custom: Option<&str>) -> Result<PathBuf, String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     #[test]
     fn launch_failure_reaps_the_browser_process() {
@@ -515,6 +547,23 @@ mod tests {
             .status()
             .unwrap();
         assert!(!status.success(), "failed launch left its browser running");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dir_size_skips_symlinks_and_avoids_loops() {
+        let tmp = std::env::temp_dir().join(format!("webdriver-dir-size-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let sub = tmp.join("Default");
+        fs::create_dir_all(&sub).unwrap();
+
+        fs::write(sub.join("Preferences"), b"1234567890").unwrap();
+        // Self-referential directory symlink loop + dangling SingletonLock symlink
+        symlink(&tmp, sub.join("loop")).unwrap();
+        symlink("hostname-99999", tmp.join("SingletonLock")).unwrap();
+
+        assert_eq!(dir_size(&tmp), 10);
 
         let _ = fs::remove_dir_all(&tmp);
     }

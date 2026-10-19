@@ -12,6 +12,7 @@ use browser::BrowserInstance;
 use cdp::{CdpSession, ConsoleEntry};
 use cli::{Action, CliOptions};
 use dsl::{ConsoleMode, Step};
+use local_common::format_size;
 use local_common::term::{color_enabled_for, file_uri, format_duration, Colour};
 use std::fs;
 use std::io::{BufRead, Write};
@@ -33,11 +34,11 @@ pub fn run(args: &[String], out: &mut impl Write) -> Result<i32, String> {
 
     match cli::parse_args(args)? {
         Action::Help => {
-            cli::print_help();
+            cli::print_help(out, &c);
             Ok(0)
         }
         Action::Version => {
-            cli::print_version();
+            cli::print_version(out);
             Ok(0)
         }
         Action::ListSessions => {
@@ -141,25 +142,28 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
         target_dir,
         &opts.browser_args,
     )?;
+    session.set_default_timeout(opts.default_timeout_ms);
 
     let mut failures = 0;
     let mut step_num = 0;
 
-    for step in &opts.steps {
-        step_num += 1;
-        match run_step(&mut session, step, step_num, opts, out, &c) {
-            Ok(Flow::Continue) => {}
-            Ok(Flow::Stop) => {
-                instance.shutdown(&mut session);
-                return Ok(finish(failures, opts, overall_start, out, &c));
-            }
-            Err(e) => {
-                instance.shutdown(&mut session);
-                return Err(e);
-            }
+    match execute_steps(
+        &mut session,
+        &opts.steps,
+        opts,
+        &mut step_num,
+        &mut failures,
+        out,
+        &c,
+    ) {
+        Ok(Flow::Continue) => {}
+        Ok(Flow::Stop) => {
+            instance.shutdown(&mut session);
+            return Ok(finish(failures, opts, overall_start, out, &c));
         }
-        if let Step::Close = step {
-            break;
+        Err(e) => {
+            instance.shutdown(&mut session);
+            return Err(e);
         }
     }
 
@@ -190,7 +194,6 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
             let mut stop = false;
             for step in &parsed {
                 step_num += 1;
-                let before = failures;
                 match run_step(&mut session, step, step_num, opts, out, &c) {
                     Ok(Flow::Continue) => {}
                     Ok(Flow::Stop) => {
@@ -206,7 +209,6 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
                         }
                     }
                 }
-                let _ = before;
             }
             let _ = out.flush();
             if stop {
@@ -217,6 +219,33 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
 
     instance.shutdown(&mut session);
     Ok(finish(failures, opts, overall_start, out, &c))
+}
+
+fn execute_steps(
+    session: &mut CdpSession,
+    steps: &[Step],
+    opts: &CliOptions,
+    step_num: &mut usize,
+    failures: &mut usize,
+    out: &mut impl Write,
+    c: &Colour,
+) -> Result<Flow, String> {
+    for step in steps {
+        *step_num += 1;
+        match run_step(session, step, *step_num, opts, out, c) {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Stop) => return Ok(Flow::Stop),
+            Err(e) => {
+                if opts.keep_going {
+                    *failures += 1;
+                    let _ = writeln!(out, "{} {e}", c.red("err"));
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(Flow::Continue)
 }
 
 enum Flow {
@@ -531,18 +560,118 @@ fn truncate(s: &str, limit: usize) -> String {
     format!("{head}…")
 }
 
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cdp::WebSocketClient;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::thread;
 
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
+    #[test]
+    fn help_and_version_write_to_out_buffer() {
+        let mut out = Vec::new();
+        let code = run(&["--version".to_string()], &mut out).unwrap();
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(out).unwrap().starts_with("webdriver "));
+
+        let mut help_out = Vec::new();
+        let code = run(&["--help".to_string()], &mut help_out).unwrap();
+        assert_eq!(code, 0);
+        assert!(String::from_utf8(help_out).unwrap().contains("USAGE:"));
+
+        let mut plain_help = Vec::new();
+        cli::print_help(&mut plain_help, &Colour::new(false));
+        let plain_str = String::from_utf8(plain_help).unwrap();
+        assert!(plain_str.contains("USAGE:"));
+        assert!(!plain_str.contains('\x1b'));
+    }
+
+    #[test]
+    fn keep_going_continues_past_failing_batch_step() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 512];
+            let _ = sock.read(&mut req);
+            sock.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .unwrap();
+
+            // Read first CDP request (id=1, failing eval)
+            let mut hdr = [0u8; 2];
+            sock.read_exact(&mut hdr).unwrap();
+            let len = (hdr[1] & 0x7f) as usize;
+            let mut body = vec![0u8; 4 + len];
+            sock.read_exact(&mut body).unwrap();
+
+            let err_reply = br#"{"id":1,"error":{"message":"synthetic failure"}}"#;
+            let mut frame = vec![0x81, err_reply.len() as u8];
+            frame.extend_from_slice(err_reply);
+            sock.write_all(&frame).unwrap();
+
+            // Read second CDP request (id=2, succeeding eval)
+            sock.read_exact(&mut hdr).unwrap();
+            let len2 = (hdr[1] & 0x7f) as usize;
+            let mut body2 = vec![0u8; 4 + len2];
+            sock.read_exact(&mut body2).unwrap();
+
+            let ok_reply = br#"{"id":2,"result":{"result":{"value":42}}}"#;
+            let mut frame2 = vec![0x81, ok_reply.len() as u8];
+            frame2.extend_from_slice(ok_reply);
+            sock.write_all(&frame2).unwrap();
+        });
+
+        let ws = WebSocketClient::connect("127.0.0.1", port, "/devtools/page/1").unwrap();
+        let mut session = CdpSession::new(ws);
+        let steps = vec![
+            Step::Eval {
+                expr: "bad()".to_string(),
+            },
+            Step::Eval {
+                expr: "40 + 2".to_string(),
+            },
+        ];
+        let opts = CliOptions {
+            custom_browser: None,
+            browser_args: Vec::new(),
+            default_timeout_ms: 5_000,
+            headless: true,
+            quiet: false,
+            verbose: false,
+            session_name: None,
+            user_data_dir: None,
+            steps: steps.clone(),
+            keep_going: true,
+            stream_stdin: false,
+        };
+
+        let mut step_num = 0;
+        let mut failures = 0;
+        let mut out = Vec::new();
+        let c = Colour::new(false);
+
+        let flow = execute_steps(
+            &mut session,
+            &steps,
+            &opts,
+            &mut step_num,
+            &mut failures,
+            &mut out,
+            &c,
+        )
+        .unwrap();
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(failures, 1);
+        assert_eq!(step_num, 2);
+
+        let output = String::from_utf8(out).unwrap();
+        assert!(output.contains("err CDP Runtime.evaluate error: synthetic failure"));
+        assert!(output.contains("ok 42"));
+
+        server.join().unwrap();
     }
 }
