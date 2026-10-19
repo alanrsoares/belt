@@ -91,6 +91,12 @@ pub fn parse_lsof_output(raw: &str) -> Vec<ProcessSocket> {
 /// If `force` is true, sends `SIGKILL` (`kill -9`), otherwise `SIGTERM` (`kill -15`).
 #[cfg(not(windows))]
 pub fn kill_process(pid: u32, force: bool) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to kill PID 0",
+        ));
+    }
     let signal = if force { "-9" } else { "-TERM" };
     let status = Command::new("kill")
         .args([signal, &pid.to_string()])
@@ -141,5 +147,13 @@ bun        2535 alanrsoares    8u  IPv6 0x7a0ed7c6a89e05aa      0t0  TCP *:50000
         assert_eq!(extract_port("0.0.0.0:5173"), Some(5173));
         assert_eq!(extract_port("[::1]:9000"), Some(9000));
         assert_eq!(extract_port("invalid"), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn kill_process_rejects_pid_zero() {
+        let err = kill_process(0, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("refusing to kill PID 0"));
     }
 }

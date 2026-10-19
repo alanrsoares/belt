@@ -82,7 +82,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             s if s.starts_with('-') => return Err(format!("unknown flag: {s}")),
             s => {
                 if let Ok(port) = s.parse::<u16>() {
-                    p.ports.push(port);
+                    if port > 0 {
+                        p.ports.push(port);
+                    } else {
+                        return Err(format!("invalid port number: '{s}'"));
+                    }
                 } else {
                     return Err(format!("invalid port number: '{s}'"));
                 }
@@ -141,5 +145,11 @@ mod tests {
         let p = parse(vec!["-f".to_string(), "node".to_string()]).unwrap();
         assert_eq!(p.action, Action::Kill);
         assert_eq!(p.process_names, vec!["node"]);
+    }
+
+    #[test]
+    fn parse_rejects_port_zero() {
+        let err = parse(vec!["0".to_string()]).unwrap_err();
+        assert!(err.contains("invalid port number: '0'"));
     }
 }

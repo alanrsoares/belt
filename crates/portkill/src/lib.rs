@@ -178,22 +178,22 @@ pub fn filter_sockets<'a>(
 pub fn print_socket_table(sockets: &[&ProcessSocket], c: &Colour, out: &mut impl Write) {
     let _ = writeln!(
         out,
-        "{:<8} {:<8} {:<16} {:<8} {:<12} {}",
-        c.bold("PORT"),
-        c.bold("PID"),
-        c.bold("COMMAND"),
-        c.bold("PROTO"),
-        c.bold("USER"),
+        "{} {} {} {} {} {}",
+        c.bold(format!("{:<8}", "PORT")),
+        c.bold(format!("{:<8}", "PID")),
+        c.bold(format!("{:<16}", "COMMAND")),
+        c.bold(format!("{:<8}", "PROTO")),
+        c.bold(format!("{:<12}", "USER")),
         c.bold("ADDRESS")
     );
 
     for s in sockets {
         let _ = writeln!(
             out,
-            "{:<8} {:<8} {:<16} {:<8} {:<12} {}",
-            c.cyan(s.port.to_string()),
+            "{} {:<8} {} {:<8} {:<12} {}",
+            c.cyan(format!("{:<8}", s.port)),
             s.pid,
-            c.bold(&s.command),
+            c.bold(format!("{:<16}", s.command)),
             s.proto,
             s.user,
             s.address
@@ -204,6 +204,7 @@ pub fn print_socket_table(sockets: &[&ProcessSocket], c: &Colour, out: &mut impl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use local_common::strip_ansi;
 
     #[test]
     fn filter_sockets_by_port_and_name() {
@@ -238,8 +239,35 @@ mod tests {
     }
 
     #[test]
+    fn print_socket_table_aligns_columns_with_ansi() {
+        let s = ProcessSocket {
+            pid: 123,
+            command: "node".into(),
+            user: "alan".into(),
+            proto: "TCP".into(),
+            port: 3000,
+            address: "*:3000".into(),
+            state: "LISTEN".into(),
+        };
+        let mut out_col = Vec::new();
+        let mut out_plain = Vec::new();
+        print_socket_table(&[&s], &Colour::new(true), &mut out_col);
+        print_socket_table(&[&s], &Colour::new(false), &mut out_plain);
+
+        let stripped = strip_ansi(&String::from_utf8(out_col).unwrap());
+        let plain = String::from_utf8(out_plain).unwrap();
+        assert_eq!(stripped, plain);
+    }
+
+    #[test]
     fn kill_exit_code_reflects_signal_failures() {
         assert_eq!(kill_exit_code(false), 0);
         assert_eq!(kill_exit_code(true), 1);
+    }
+
+    #[test]
+    fn kill_process_rejects_pid_zero() {
+        let err = kill_process(0, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

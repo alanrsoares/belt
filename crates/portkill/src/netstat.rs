@@ -32,6 +32,12 @@ fn query_process_names() -> std::io::Result<HashMap<u32, String>> {
 /// If `force` is true, passes `/F` to force termination.
 #[cfg(windows)]
 pub fn kill_process(pid: u32, force: bool) -> std::io::Result<()> {
+    if pid == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "refusing to kill PID 0",
+        ));
+    }
     let mut cmd = Command::new("taskkill");
     if force {
         cmd.arg("/F");
@@ -127,7 +133,13 @@ pub fn parse_tasklist_output(raw: &str) -> HashMap<u32, String> {
             let image_name = parts[0].trim_matches('"');
             let pid_str = parts[1].trim_matches('"');
             if let Ok(pid) = pid_str.parse::<u32>() {
-                let clean_name = image_name.strip_suffix(".exe").unwrap_or(image_name);
+                let clean_name = if image_name.len() > 4
+                    && image_name[image_name.len() - 4..].eq_ignore_ascii_case(".exe")
+                {
+                    &image_name[..image_name.len() - 4]
+                } else {
+                    image_name
+                };
                 map.insert(pid, clean_name.to_string());
             }
         }
@@ -145,7 +157,7 @@ mod tests {
 "System Idle Process","0","Services","0","8 K"
 "System","4","Services","0","3,828 K"
 "node.exe","14280","Console","1","35,420 K"
-"bun.exe","9124","Console","1","24,100 K"
+"bun.EXE","9124","Console","1","24,100 K"
 "#;
         let tasks = parse_tasklist_output(sample);
         assert_eq!(tasks.get(&14280).map(|s| s.as_str()), Some("node"));
@@ -183,5 +195,13 @@ Active Connections
         assert_eq!(sockets[2].port, 5173);
         assert_eq!(sockets[2].pid, 9124);
         assert_eq!(sockets[2].command, "bun");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn kill_process_rejects_pid_zero() {
+        let err = kill_process(0, false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("refusing to kill PID 0"));
     }
 }
