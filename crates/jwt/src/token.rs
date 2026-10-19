@@ -21,6 +21,11 @@ impl JwtToken {
     /// Parse and decode a raw JWT string (`header.payload.signature`).
     pub fn parse(raw: &str) -> Result<Self, String> {
         let raw = raw.trim();
+        let raw = if raw.len() > 7 && raw[..7].eq_ignore_ascii_case("bearer ") {
+            raw[7..].trim()
+        } else {
+            raw
+        };
         let parts: Vec<&str> = raw.split('.').collect();
         if parts.len() != 3 {
             return Err(format!(
@@ -55,34 +60,37 @@ impl JwtToken {
 
     /// Check expiration status and return human-readable summary.
     pub fn expiration_status(&self, now_secs: u64) -> Option<TokenStatus> {
-        let exp_str = self.get_claim("exp")?;
-        let exp: u64 = exp_str.parse().ok()?;
+        let parse_epoch = |s: String| {
+            s.parse::<u64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().map(|f| f as u64))
+        };
 
-        let nbf = self.get_claim("nbf").and_then(|s| s.parse::<u64>().ok());
+        let exp = self.get_claim("exp").and_then(parse_epoch);
+        let nbf = self.get_claim("nbf").and_then(parse_epoch);
+
+        if let Some(exp_secs) = exp {
+            if now_secs > exp_secs {
+                return Some(TokenStatus::Expired {
+                    diff_secs: now_secs - exp_secs,
+                    exp_epoch: exp_secs,
+                });
+            }
+        }
 
         if let Some(nbf_secs) = nbf {
             if now_secs < nbf_secs {
-                let diff = nbf_secs - now_secs;
                 return Some(TokenStatus::NotYetValid {
-                    diff_secs: diff,
+                    diff_secs: nbf_secs - now_secs,
                     nbf_epoch: nbf_secs,
                 });
             }
         }
 
-        if now_secs > exp {
-            let diff = now_secs - exp;
-            Some(TokenStatus::Expired {
-                diff_secs: diff,
-                exp_epoch: exp,
-            })
-        } else {
-            let diff = exp - now_secs;
-            Some(TokenStatus::Valid {
-                diff_secs: diff,
-                exp_epoch: exp,
-            })
-        }
+        exp.map(|exp_secs| TokenStatus::Valid {
+            diff_secs: exp_secs - now_secs,
+            exp_epoch: exp_secs,
+        })
     }
 
     /// Format full inspection view.
@@ -210,6 +218,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_strips_bearer_prefix_case_insensitively() {
+        let raw = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig";
+        let t1 = JwtToken::parse(&format!("Bearer {raw}")).unwrap();
+        let t2 = JwtToken::parse(&format!("  bearer   {raw}  ")).unwrap();
+        assert_eq!(t1.get_claim("sub"), Some("1234567890".to_string()));
+        assert_eq!(t2.get_claim("sub"), Some("1234567890".to_string()));
+    }
+
+    #[test]
     fn format_duration_samples() {
         assert_eq!(format_duration(45), "45s");
         assert_eq!(format_duration(125), "2m 5s");
@@ -241,6 +258,33 @@ mod tests {
                 diff_secs: 100,
                 exp_epoch: 1000
             }
+        );
+    }
+
+    #[test]
+    fn expiration_status_handles_nbf_only_and_exp_priority() {
+        let header = base64url::encode(br#"{"alg":"HS256"}"#);
+        let nbf_only_payload = base64url::encode(br#"{"sub":"alan","nbf":2000}"#);
+        let token_nbf = JwtToken::parse(&format!("{header}.{nbf_only_payload}.sig")).unwrap();
+
+        assert_eq!(
+            token_nbf.expiration_status(1500),
+            Some(TokenStatus::NotYetValid {
+                diff_secs: 500,
+                nbf_epoch: 2000
+            })
+        );
+        assert_eq!(token_nbf.expiration_status(2500), None);
+
+        // When both exp and nbf exist and token is already expired, exp check takes precedence
+        let both_payload = base64url::encode(br#"{"exp":1000,"nbf":2000}"#);
+        let token_both = JwtToken::parse(&format!("{header}.{both_payload}.sig")).unwrap();
+        assert_eq!(
+            token_both.expiration_status(1500),
+            Some(TokenStatus::Expired {
+                diff_secs: 500,
+                exp_epoch: 1000
+            })
         );
     }
 }
