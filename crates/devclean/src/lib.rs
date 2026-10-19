@@ -46,8 +46,10 @@ fn build_scan_options(p: &Parsed) -> ScanOptions {
     ScanOptions {
         root: p.path.clone(),
         targets: p.targets.clone(),
-        min_size_bytes: p.min_size_mb * 1024 * 1024,
-        older_than: p.older_than_days.map(|d| Duration::from_secs(d * 86400)),
+        min_size_bytes: p.min_size_mb.saturating_mul(1024 * 1024),
+        older_than: p
+            .older_than_days
+            .map(|d| Duration::from_secs(d.saturating_mul(86400))),
         max_depth: 10,
     }
 }
@@ -117,6 +119,7 @@ fn run_clean(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
 
     let mut deleted_bytes: u64 = 0;
     let mut deleted_count: usize = 0;
+    let mut errors: usize = 0;
 
     for a in &artifacts {
         match fs::remove_dir_all(&a.path) {
@@ -138,6 +141,7 @@ fn run_clean(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
                     c.red("✗"),
                     a.path.display()
                 );
+                errors += 1;
             }
         }
     }
@@ -150,33 +154,34 @@ fn run_clean(p: &Parsed, c: &Colour, out: &mut impl Write) -> i32 {
         c.bold(format_size(deleted_bytes))
     );
 
-    0
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn print_artifacts_table(artifacts: &[Artifact], c: &Colour, out: &mut impl Write) {
     let _ = writeln!(
         out,
-        "\n{:<12} {:<12} {}",
-        c.bold("ECOSYSTEM"),
-        c.bold("SIZE"),
+        "\n{} {} {}",
+        c.bold(format!("{:<12}", "ECOSYSTEM")),
+        c.bold(format!("{:<12}", "SIZE")),
         c.bold("PATH")
     );
 
-    for a in artifacts {
-        let eco_color = match a.artifact_type {
-            ArtifactType::Rust => c.cyan(a.artifact_type.to_string()),
-            ArtifactType::Node => c.green(a.artifact_type.to_string()),
-            ArtifactType::Python => c.yellow(a.artifact_type.to_string()),
-            ArtifactType::DotNet => c.bold(a.artifact_type.to_string()),
+    for art in artifacts {
+        let eco_padded = format!("{:<12}", art.artifact_type.label());
+        let eco_color = match art.artifact_type {
+            ArtifactType::Rust => c.cyan(eco_padded),
+            ArtifactType::Node => c.green(eco_padded),
+            ArtifactType::Python => c.yellow(eco_padded),
+            ArtifactType::DotNet => c.bold(eco_padded),
         };
+        let size_str = format_size(art.size_bytes);
+        let size_padded = format!("{:<12}", size_str);
 
-        let _ = writeln!(
-            out,
-            "{:<12} {:<12} {}",
-            eco_color,
-            format_size(a.size_bytes),
-            a.path.display()
-        );
+        let _ = writeln!(out, "{} {} {}", eco_color, size_padded, art.path.display());
     }
 }
 

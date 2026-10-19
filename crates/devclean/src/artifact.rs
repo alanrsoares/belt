@@ -32,9 +32,18 @@ impl ArtifactType {
             // classify it as Rust output when its project root has a manifest.
             "target" if parent.join("Cargo.toml").is_file() => Some(ArtifactType::Rust),
             "node_modules" | ".next" | ".nuxt" | ".turbo" | ".svelte-kit" | ".astro" | ".vite"
-            | ".parcel-cache" | "coverage" | ".nyc_output" => Some(ArtifactType::Node),
-            ".venv" | "venv" | "__pycache__" | ".pytest_cache" | ".ruff_cache" | ".mypy_cache"
-            | ".tox" | ".nox" => Some(ArtifactType::Python),
+            | ".parcel-cache" | ".nyc_output" => Some(ArtifactType::Node),
+            "coverage" if parent.join("package.json").is_file() => Some(ArtifactType::Node),
+            ".venv" | "venv"
+                if parent.join(dir_name).join("pyvenv.cfg").is_file()
+                    || parent.join("pyproject.toml").is_file()
+                    || parent.join("requirements.txt").is_file() =>
+            {
+                Some(ArtifactType::Python)
+            }
+            "__pycache__" | ".pytest_cache" | ".ruff_cache" | ".mypy_cache" | ".tox" | ".nox" => {
+                Some(ArtifactType::Python)
+            }
             "bin" | "obj" => {
                 if has_dotnet_markers(parent) {
                     Some(ArtifactType::DotNet)
@@ -71,7 +80,7 @@ fn has_dotnet_markers(dir: &Path) -> bool {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
             if let Some(ext) = e.path().extension() {
-                if ext == "csproj" || ext == "fsproj" || ext == "sln" {
+                if ext == "csproj" || ext == "fsproj" || ext == "vbproj" {
                     return true;
                 }
             }
@@ -95,22 +104,7 @@ pub struct Artifact {
     pub last_modified: Option<SystemTime>,
 }
 
-/// Format a byte count into a human-readable size string (B, KB, MB, GB).
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
-}
+pub use local_common::format_size;
 
 #[cfg(test)]
 mod tests {
@@ -146,6 +140,41 @@ mod tests {
         assert_eq!(
             ArtifactType::detect("target", &tmp),
             Some(ArtifactType::Rust)
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detect_avoids_false_positives_for_coverage_venv_and_dotnet_sln() {
+        let tmp = std::env::temp_dir().join("devclean-false-positives-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("venv")).unwrap();
+
+        // coverage without package.json is ignored
+        assert_eq!(ArtifactType::detect("coverage", &tmp), None);
+        std::fs::write(tmp.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            ArtifactType::detect("coverage", &tmp),
+            Some(ArtifactType::Node)
+        );
+
+        // venv without pyvenv.cfg, pyproject.toml, or requirements.txt is ignored
+        assert_eq!(ArtifactType::detect("venv", &tmp), None);
+        assert_eq!(ArtifactType::detect(".venv", &tmp), None);
+        std::fs::write(tmp.join("venv/pyvenv.cfg"), "home = /usr/bin").unwrap();
+        assert_eq!(
+            ArtifactType::detect("venv", &tmp),
+            Some(ArtifactType::Python)
+        );
+
+        // bin in a directory with only .sln is ignored; .csproj/.vbproj is detected
+        std::fs::write(tmp.join("App.sln"), "").unwrap();
+        assert_eq!(ArtifactType::detect("bin", &tmp), None);
+        std::fs::write(tmp.join("App.vbproj"), "").unwrap();
+        assert_eq!(
+            ArtifactType::detect("bin", &tmp),
+            Some(ArtifactType::DotNet)
         );
 
         let _ = std::fs::remove_dir_all(&tmp);

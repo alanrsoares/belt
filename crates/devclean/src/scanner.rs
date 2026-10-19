@@ -101,11 +101,12 @@ pub fn scan(options: &ScanOptions) -> Vec<Artifact> {
         }
 
         // Age filter
-        if let (Some(req_age), Some(time)) = (options.older_than, art.last_modified) {
-            if let Ok(elapsed) = now.duration_since(time) {
-                if elapsed < req_age {
-                    continue;
-                }
+        if let Some(req_age) = options.older_than {
+            let is_old_enough = art
+                .last_modified
+                .is_some_and(|time| now.duration_since(time).unwrap_or(Duration::ZERO) >= req_age);
+            if !is_old_enough {
+                continue;
             }
         }
 
@@ -180,13 +181,21 @@ fn walk_candidates(
 /// Recursively compute total directory size and latest modified timestamp.
 pub fn calculate_dir_size(dir: &Path) -> (u64, Option<SystemTime>) {
     let mut total_size: u64 = 0;
-    let mut latest_mtime: Option<SystemTime> = None;
+    let mut latest_mtime: Option<SystemTime> = fs::symlink_metadata(dir)
+        .ok()
+        .and_then(|m| m.modified().ok());
 
     let mut stack = vec![dir.to_path_buf()];
 
     while let Some(current) = stack.pop() {
         if let Ok(entries) = fs::read_dir(&current) {
             for entry in entries.flatten() {
+                let Ok(ft) = entry.file_type() else {
+                    continue;
+                };
+                if ft.is_symlink() {
+                    continue;
+                }
                 if let Ok(meta) = entry.metadata() {
                     total_size += meta.len();
                     if let Ok(mtime) = meta.modified() {
@@ -195,10 +204,9 @@ pub fn calculate_dir_size(dir: &Path) -> (u64, Option<SystemTime>) {
                             None => Some(mtime),
                         };
                     }
-
-                    if meta.is_dir() {
-                        stack.push(entry.path());
-                    }
+                }
+                if ft.is_dir() {
+                    stack.push(entry.path());
                 }
             }
         }
@@ -238,6 +246,53 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert!(found.iter().any(|a| a.artifact_type == ArtifactType::Rust));
         assert!(found.iter().any(|a| a.artifact_type == ArtifactType::Node));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn calculate_dir_size_seeds_mtime_and_skips_symlinks() {
+        let tmp = std::env::temp_dir().join("devclean-test-dir-size-symlinks");
+        let _ = fs::remove_dir_all(&tmp);
+        let empty_dir = tmp.join("empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let (empty_size, empty_mtime) = calculate_dir_size(&empty_dir);
+        assert_eq!(empty_size, 0);
+        assert!(empty_mtime.is_some());
+
+        #[cfg(unix)]
+        {
+            let loop_dir = tmp.join("loop_dir");
+            fs::create_dir_all(&loop_dir).unwrap();
+            fs::write(loop_dir.join("data.txt"), "hello").unwrap();
+            std::os::unix::fs::symlink(&loop_dir, loop_dir.join("self_link")).unwrap();
+
+            let (size, mtime) = calculate_dir_size(&loop_dir);
+            assert!(size >= 5);
+            assert!(mtime.is_some());
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn scan_older_than_excludes_fresh_and_empty_directories() {
+        let tmp = std::env::temp_dir().join("devclean-test-older-than");
+        let _ = fs::remove_dir_all(&tmp);
+
+        let node_proj = tmp.join("node_proj");
+        let node_modules = node_proj.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+
+        let opts = ScanOptions {
+            root: tmp.clone(),
+            older_than: Some(Duration::from_secs(3600)),
+            ..Default::default()
+        };
+
+        let found = scan(&opts);
+        assert!(found.is_empty());
 
         let _ = fs::remove_dir_all(&tmp);
     }
