@@ -45,7 +45,7 @@ pub fn color_decision(force_off: bool, no_color_set: bool, stream_is_tty: bool) 
 pub fn color_enabled_for(stream: &impl IsTerminal, force_off: bool) -> bool {
     color_decision(
         force_off,
-        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         stream.is_terminal(),
     )
 }
@@ -60,14 +60,21 @@ fn query_terminal_columns() -> usize {
     }
 
     #[cfg(unix)]
-    if let Ok(output) = std::process::Command::new("stty").arg("size").output() {
-        if output.status.success() {
-            if let Ok(s) = std::str::from_utf8(&output.stdout) {
-                let parts: Vec<&str> = s.split_whitespace().collect();
-                if parts.len() == 2 {
-                    if let Ok(cols) = parts[1].parse::<usize>() {
-                        if cols > 0 {
-                            return cols;
+    {
+        let mut cmd = std::process::Command::new("stty");
+        cmd.arg("size");
+        if let Ok(tty) = std::fs::File::open("/dev/tty") {
+            cmd.stdin(tty);
+        }
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                if let Ok(s) = std::str::from_utf8(&output.stdout) {
+                    let parts: Vec<&str> = s.split_whitespace().collect();
+                    if parts.len() == 2 {
+                        if let Ok(cols) = parts[1].parse::<usize>() {
+                            if cols > 0 {
+                                return cols;
+                            }
                         }
                     }
                 }
@@ -166,6 +173,23 @@ pub fn format_duration(d: Duration) -> String {
         format!("{ms}ms")
     } else {
         format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
+/// Format byte size into human-readable units (`B`, `KB`, `MB`, `GB`).
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

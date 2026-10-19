@@ -35,10 +35,12 @@ impl CommonFlags {
         match arg {
             "--color" => {
                 self.color = true;
+                self.no_color = false;
                 true
             }
             "--no-color" => {
                 self.no_color = true;
+                self.color = false;
                 true
             }
             _ => false,
@@ -83,12 +85,15 @@ impl<I: Iterator<Item = String>> Iterator for ArgCursor<I> {
 ///
 /// For example:
 /// - `"--foo=bar"` -> `("--foo", Some("bar"))`
+/// - `"-f=bar"` -> `("-f", Some("bar"))`
 /// - `"--foo"` -> `("--foo", None)`
 /// - `"-f"` -> `("-f", None)`
 pub fn split_flag(arg: &str) -> (&str, Option<&str>) {
-    if arg.starts_with("--") {
+    if arg.starts_with('-') {
         if let Some((flag, val)) = arg.split_once('=') {
-            return (flag, Some(val));
+            if !flag.is_empty() && flag != "-" && flag != "--" {
+                return (flag, Some(val));
+            }
         }
     }
     (arg, None)
@@ -132,10 +137,13 @@ mod tests {
         assert!(!flags.color && !flags.no_color);
 
         assert!(flags.check_arg("--color"));
-        assert!(flags.color);
+        assert!(flags.color && !flags.no_color);
 
         assert!(flags.check_arg("--no-color"));
-        assert!(flags.no_color);
+        assert!(flags.no_color && !flags.color);
+
+        assert!(flags.check_arg("--color"));
+        assert!(flags.color && !flags.no_color);
 
         assert!(!flags.check_arg("--other"));
     }

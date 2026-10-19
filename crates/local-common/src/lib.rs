@@ -14,16 +14,18 @@
 //! Add new cross-cutting concern as its own module and re-export the small,
 //! stable public surface from here so tool crates keep a single import path.
 
+pub mod base64;
 pub mod cli;
+pub mod json;
 pub mod paths;
 pub mod process;
 pub mod term;
 
 pub use cli::{split_flag, ArgCursor, CommonFlags};
-pub use paths::{tool_config_dir, tool_data_dir};
+pub use paths::{ensure_dir, tool_config_dir, tool_data_dir};
 pub use term::{
-    color_enabled_for, draw_meter, format_duration, is_terminal, strip_ansi, terminal_columns,
-    visible_width, Colour, CursorGuard, PALETTE, SPINNER,
+    color_enabled_for, draw_meter, file_uri, format_duration, format_size, is_terminal, strip_ansi,
+    terminal_columns, visible_width, Colour, CursorGuard, PALETTE, SPINNER,
 };
 
 /// The shared, human-readable project name. Handy for `--help` strings and

@@ -22,7 +22,8 @@ pub const TOOL_ROOT: &str = "belt";
 /// Resolve the user's home directory from `$HOME` (or `%USERPROFILE%` on Windows).
 pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|v| !v.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
         .map(PathBuf::from)
 }
 
@@ -31,7 +32,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Honours `XDG_CONFIG_HOME` when set; otherwise falls back to the home-rooted
 /// location. Returns `None` only when `$HOME` is unavailable.
 pub fn tool_config_dir(tool: &str) -> Option<PathBuf> {
-    if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
+    if let Some(base) = env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(base).join(TOOL_ROOT).join(tool));
     }
     home_dir().map(|h| join_under(&h, ".config", tool))
@@ -39,7 +40,7 @@ pub fn tool_config_dir(tool: &str) -> Option<PathBuf> {
 
 /// XDG data dir for `tool`, e.g. `~/.local/share/belt/<tool>`.
 pub fn tool_data_dir(tool: &str) -> Option<PathBuf> {
-    if let Some(base) = env::var_os("XDG_DATA_HOME") {
+    if let Some(base) = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(base).join(TOOL_ROOT).join(tool));
     }
     home_dir().map(|h| join_under(&h, ".local/share", tool))
@@ -85,5 +86,6 @@ mod tests {
 
         // Second call must be a clean no-op, not an error.
         ensure_dir(&target).expect("idempotent re-create should succeed");
+        let _ = fs::remove_dir_all(&base);
     }
 }

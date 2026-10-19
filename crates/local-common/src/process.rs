@@ -31,12 +31,22 @@ pub fn own_process_group(cmd: &mut Command) {
 /// subprocesses forked by a `child` spawned via [`own_process_group`] don't
 /// outlive it.
 pub fn terminate(child: &mut Child) {
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
+    }
+
     #[cfg(unix)]
     {
+        let pgid = format!("-{}", child.id());
         // A negative PID targets the process group created at spawn.
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{}", child.id())])
-            .status();
+        let _ = Command::new("kill").args(["-TERM", &pgid]).status();
+        for _ in 0..10 {
+            if let Ok(Some(_)) = child.try_wait() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = Command::new("kill").args(["-KILL", &pgid]).status();
     }
     #[cfg(windows)]
     {
