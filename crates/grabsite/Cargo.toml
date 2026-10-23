@@ -1,0 +1,32 @@
+# =============================================================================
+#  grabsite — crate manifest
+#
+#  GUI-mode website capture for hardened browser builds (Mullvad Browser,
+#  Tor Browser) where the CDP surface is intentionally disabled.
+# =============================================================================
+
+[package]
+name = "grabsite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# One-shot screenshotter for GUI-only (CDP-disabled) browser builds: spins up
+# a private virtual X display, launches the browser in GUI mode, waits for
+# first paint, and grabs the root window to PNG via `import`.
+
+[lib]
+name = "grabsite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "grabsite"
+path = "src/main.rs"
+
+[dependencies]
+local-common = { path = "../local-common" }
+
+[lints]
+workspace = true

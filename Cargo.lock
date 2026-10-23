@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "grabsite"
+version = "0.1.0"
+dependencies = [
+ "local-common",
+]
+
+[[package]]
 name = "jwt"
 version = "0.1.0"
 dependencies = [

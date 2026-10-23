@@ -15,7 +15,7 @@
 set -eu
 
 REPO="alanrsoares/belt"
-ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver"
+ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite"
 BIN_DIR="${BELT_BIN_DIR:-$HOME/.local/bin}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
