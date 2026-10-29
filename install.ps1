@@ -59,13 +59,13 @@ $ApiUrl = if ($env:BELT_API_URL) {
 }
 
 $ReleaseVersion = if ($env:BELT_VERSION) { $env:BELT_VERSION } else { 'latest' }
-Write-Host "» platform: windows-$Arch"
-Write-Host "» looking up release ($ReleaseVersion)…"
+Write-Host ">> platform: windows-$Arch"
+Write-Host ">> looking up release ($ReleaseVersion)..."
 
 try {
     $Release = Invoke-RestMethod -Uri $ApiUrl -Headers $Headers -Method Get
 } catch {
-    Write-Error "failed to look up release from $ApiUrl: $_"
+    Write-Error "failed to look up release from $($ApiUrl): $_"
     exit 1
 }
 
@@ -90,7 +90,7 @@ New-Item -ItemType Directory -Path $TmpDir -Force | Out-Null
 
 try {
     $TarFile = Join-Path $TmpDir $Asset
-    Write-Host "» downloading $Asset…"
+    Write-Host ">> downloading $Asset..."
 
     $DownloadHeaders = @{ "User-Agent" = "belt-installer" }
     if ($Token) {
@@ -109,25 +109,26 @@ try {
             Write-Error "checksum mismatch:`n expected: $ExpectedSha`n actual:   $ActualSha"
             exit 1
         }
-        Write-Host "» checksum ok"
+        Write-Host ">> checksum ok"
     }
 
     if (-not (Test-Path $BinDir)) {
         New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     }
 
-    tar -xzf $TarFile -C $TmpDir
+    $TarExe = if (Test-Path "$env:SystemRoot\System32\tar.exe") { "$env:SystemRoot\System32\tar.exe" } else { "tar" }
+    & $TarExe -xzf $TarFile -C $TmpDir
 
     foreach ($tool in $SelectedTools) {
         $ExeName = "$tool.exe"
         $Src = Join-Path $TmpDir $ExeName
         $Dest = Join-Path $BinDir $ExeName
         if (-not (Test-Path $Src)) {
-            Write-Error "$ExeName is missing from $Asset"
-            exit 1
+            Write-Host "[-] $ExeName not found in this release ($ReleaseVersion), skipped"
+            continue
         }
         Copy-Item -Path $Src -Destination $Dest -Force
-        Write-Host "✓ $Dest"
+        Write-Host "[ok] $Dest"
     }
 
     $PathDirs = ($env:PATH -split [System.IO.Path]::PathSeparator)
