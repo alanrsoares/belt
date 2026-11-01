@@ -71,8 +71,7 @@ belt/
 ### Configuring `fanout`
 
 `fanout check` resolves its task list by convention: every root `package.json`
-script named `lint`, `typecheck`, `fmt:check`, `format:check`, `check:skills`,
-`check:server-fns` or `themes:a11y`, then the first test script it finds
+script named `lint`, `typecheck`, `fmt:check` or `format:check`, then the first test script it finds
 (`test:unit`, `test` — or `test:all`, `test:full`, `test` for `check:full`), then
 one task per workspace package that declares `check`, falling back to
 `typecheck`. Scripts a repo does not declare are skipped, never run and failed.

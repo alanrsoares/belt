@@ -35,15 +35,7 @@ pub struct TaskSpec {
 /// repos' conventions rather than a contract — a repo that wants an exact list
 /// (or a gate script named something else entirely) declares `targets` in
 /// `fanout.json` instead.
-const DEFAULT_ROOT_GATES: &[&str] = &[
-    "lint",
-    "typecheck",
-    "fmt:check",
-    "format:check",
-    "check:skills",
-    "check:server-fns",
-    "themes:a11y",
-];
+const DEFAULT_ROOT_GATES: &[&str] = &["lint", "typecheck", "fmt:check", "format:check"];
 
 /// Root test scripts tried in order for `check:full`, then for `check`.
 const FULL_TEST_SCRIPTS: &[&str] = &["test:all", "test:full", "test"];
