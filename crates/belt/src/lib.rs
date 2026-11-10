@@ -2,10 +2,15 @@
 //! server (JSON-RPC 2.0, one message per line).
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use local_common::json::{parse, JsonValue};
+use local_common::process::{own_process_group, terminate};
 use local_common::strip_ansi;
 
 /// Newest first. `initialize` echoes the client's version when listed here.
@@ -122,32 +127,81 @@ fn tool_json(tool: &Tool) -> JsonValue {
     ])
 }
 
+/// Per-call limit, matching `fanout`'s default task timeout.
+pub const TOOL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Read a pipe to the end on its own thread so a full pipe never blocks the child.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
 /// Run `bin` with no shell and no stdin; fold stdout, stderr and the exit
-/// status into one text block.
-pub fn run_tool(bin: &Path, args: &[String]) -> (String, bool) {
-    let output = Command::new(bin)
-        .args(args)
+/// status into one text block. Kills the process tree after `timeout`.
+pub fn run_tool(bin: &Path, args: &[String], timeout: Duration) -> (String, bool) {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
-        .output();
-    let output = match output {
-        Ok(output) => output,
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    own_process_group(&mut cmd);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
         Err(err) => return (format!("failed to run {}: {err}", bin.display()), true),
     };
-    let mut text = strip_ansi(&String::from_utf8_lossy(&output.stdout));
-    let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if start.elapsed() >= timeout => {
+                terminate(&mut child);
+                break Err(format!("[timeout after {}s]", timeout.as_secs()));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(err) => {
+                terminate(&mut child);
+                break Err(format!("[wait failed: {err}]"));
+            }
+        }
+    };
+
+    // shortcut: a grandchild outside the process group can hold a pipe open; cap the wait.
+    let collect = |rx: mpsc::Receiver<Vec<u8>>| {
+        let bytes = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        strip_ansi(&String::from_utf8_lossy(&bytes))
+    };
+    let mut text = collect(stdout);
+    let stderr = collect(stderr);
     if !stderr.trim().is_empty() {
         text.push_str("\n[stderr]\n");
         text.push_str(&stderr);
     }
-    let failed = !output.status.success();
-    if failed {
-        let code = output
-            .status
-            .code()
-            .map_or("signal".to_string(), |c| c.to_string());
-        text.push_str(&format!("\n[exit {code}]"));
-    }
+    let failed = match status {
+        Ok(status) if status.success() => false,
+        Ok(status) => {
+            let code = status
+                .code()
+                .map_or("signal".to_string(), |c| c.to_string());
+            text.push_str(&format!("\n[exit {code}]"));
+            true
+        }
+        Err(note) => {
+            text.push('\n');
+            text.push_str(&note);
+            true
+        }
+    };
     (text, failed)
 }
 
@@ -172,7 +226,7 @@ fn call(
             .ok_or("`args` must be an array of strings")?,
         Some(_) => return Err("`args` must be an array of strings".to_string()),
     };
-    let (text, failed) = run_tool(&resolve(tool.name), &args);
+    let (text, failed) = run_tool(&resolve(tool.name), &args, TOOL_TIMEOUT);
     Ok(obj(vec![
         (
             "content",
@@ -367,11 +421,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn tools_call_flags_failure() {
-        let (text, failed) = run_tool(Path::new("false"), &[]);
+        let (text, failed) = run_tool(Path::new("false"), &[], TOOL_TIMEOUT);
         assert!(failed);
         assert!(text.contains("[exit 1]"));
-        let (text, failed) = run_tool(Path::new("/nonexistent/belt-tool"), &[]);
+        let (text, failed) = run_tool(Path::new("/nonexistent/belt-tool"), &[], TOOL_TIMEOUT);
         assert!(failed);
         assert!(text.starts_with("failed to run"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_call_kills_on_timeout() {
+        let start = Instant::now();
+        let (text, failed) = run_tool(
+            Path::new("sleep"),
+            &["30".to_string()],
+            Duration::from_millis(200),
+        );
+        assert!(failed);
+        assert!(text.contains("[timeout after 0s]"), "{text}");
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 }
