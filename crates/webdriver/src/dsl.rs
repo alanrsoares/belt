@@ -55,6 +55,7 @@ pub enum Step {
     },
     Url,
     Title,
+    A11y,
     Snapshot {
         all: bool,
     },
@@ -451,6 +452,10 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 steps.push(Step::Title);
             }
+            "a11y" => {
+                idx += 1;
+                steps.push(Step::A11y);
+            }
             "console" => {
                 idx += 1;
                 let mut mode = ConsoleMode::Errors;
@@ -567,6 +572,7 @@ fn is_verb(s: &str) -> bool {
             | "hover"
             | "url"
             | "title"
+            | "a11y"
             | "console"
             | "snapshot"
             | "aria"
@@ -847,6 +853,12 @@ mod tests {
         )
         .is_err());
         assert!(parse_tokens(&["screenshot".to_string(), "-s".to_string()], 30_000).is_err());
+    }
+
+    #[test]
+    fn a11y_is_a_verb() {
+        let steps = parse_script("a11y\nurl", 1000).unwrap();
+        assert_eq!(steps, vec![Step::A11y, Step::Url]);
     }
 
     #[test]

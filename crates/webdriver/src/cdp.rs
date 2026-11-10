@@ -525,6 +525,12 @@ impl CdpSession {
         Ok(())
     }
 
+    /// Basic accessibility findings, one `rule selector` per line; empty when clean.
+    pub fn a11y(&mut self) -> Result<String, String> {
+        let v = self.evaluate(include_str!("a11y.js"))?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
     pub fn evaluate(&mut self, expression: &str) -> Result<JsonValue, String> {
         let resp = self.raw_evaluate(expression, true)?;
         Ok(resp

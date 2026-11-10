@@ -366,6 +366,14 @@ fn run_step(
         Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
         Step::Url => Outcome::with(session.current_url()?),
         Step::Title => Outcome::with(session.title()?),
+        Step::A11y => {
+            let found = session.a11y()?;
+            if found.is_empty() {
+                Outcome::with("no issues in basic checks (not a WCAG audit)")
+            } else {
+                Outcome::warn(format!("{} issues\n{found}", found.lines().count()))
+            }
+        }
         Step::Console { mode } => {
             session.drain_events()?;
             let rendered = render_console(session.console_entries(), *mode);
@@ -471,6 +479,7 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Frame { .. } => "frame",
         Step::Url => "url",
         Step::Title => "title",
+        Step::A11y => "a11y",
         Step::Console { .. } => "console",
         Step::Screenshot { .. } => "screenshot",
         Step::Pdf { .. } => "pdf",
