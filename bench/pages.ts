@@ -97,6 +97,15 @@ document.getElementById("prompt").addEventListener("click", () => {
 });`,
   );
 
+const late = (): string =>
+  shell(
+    "Late",
+    `<button id="go" type="button">Go</button><p id="out"></p>`,
+    `document.getElementById("go").addEventListener("click", () => {
+  fetch("/slow").then(() => { document.getElementById("out").textContent = "loaded"; });
+});`,
+  );
+
 const flow = (step: number): string =>
   step < 4
     ? shell(
@@ -133,6 +142,7 @@ export const pages: Record<string, () => string> = {
   "/form": form,
   "/nav300": nav300,
   "/dialog": dialog,
+  "/late": late,
   "/flow/1": () => flow(1),
   "/flow/2": () => flow(2),
   "/flow/3": () => flow(3),

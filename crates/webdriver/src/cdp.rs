@@ -296,6 +296,8 @@ pub struct CdpSession {
     /// Dialogs auto-accepted since the last `take_dialogs`, for the agent to see.
     dialogs: Vec<String>,
     /// Answer for later dialogs: accept (with optional prompt text) or dismiss.
+    /// Requests started and not yet finished, by id.
+    inflight: HashMap<String, Instant>,
     dialog_accept: bool,
     dialog_text: Option<String>,
 }
@@ -313,6 +315,7 @@ impl CdpSession {
             ref_of: HashMap::new(),
             next_ref: 1,
             dialogs: Vec::new(),
+            inflight: HashMap::new(),
             dialog_accept: true,
             dialog_text: None,
         }
@@ -404,6 +407,16 @@ impl CdpSession {
                         id,
                         frame_id: frame_id.to_string(),
                     });
+                }
+            }
+            "Network.requestWillBeSent" => {
+                if let Some(id) = params.and_then(|p| p.get("requestId")).and_then(|i| i.as_str()) {
+                    self.inflight.insert(id.to_string(), Instant::now());
+                }
+            }
+            "Network.loadingFinished" | "Network.loadingFailed" => {
+                if let Some(id) = params.and_then(|p| p.get("requestId")).and_then(|i| i.as_str()) {
+                    self.inflight.remove(id);
                 }
             }
             "Runtime.executionContextDestroyed" => {
@@ -535,6 +548,7 @@ impl CdpSession {
         self.call("Page.enable", JsonValue::Object(HashMap::new()))?;
         self.call("Runtime.enable", JsonValue::Object(HashMap::new()))?;
         self.call("DOM.enable", JsonValue::Object(HashMap::new()))?;
+        self.call("Network.enable", JsonValue::Object(HashMap::new()))?;
         // Log domain surfaces network/security failures the page never logs itself.
         let _ = self.call("Log.enable", JsonValue::Object(HashMap::new()));
         let _ = self.call("Accessibility.enable", JsonValue::Object(HashMap::new()));
@@ -858,13 +872,19 @@ impl CdpSession {
         ))
     }
 
-    /// Wait until the DOM stops mutating for `quiet_ms`. Generic "SPA settled"
-    /// signal, preferable to guessing with a fixed sleep.
+    /// Wait until the DOM stops mutating for `quiet_ms` and no request is in
+    /// flight. Generic "SPA settled" signal, preferable to a fixed sleep.
     pub fn wait_for_quiet(&mut self, quiet_ms: u64, timeout_ms: u64) -> Result<(), String> {
-        let script = format!(
-            r#"new Promise((resolve) => {{
+        // shortcut: a request open over 3 s counts as a long poll and is ignored, raise if
+        // slow APIs settle too early.
+        const LONG_POLL: Duration = Duration::from_secs(3);
+        let start = Instant::now();
+        loop {
+            let left = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
+            let script = format!(
+                r#"new Promise((resolve) => {{
                 let last = Date.now();
-                const deadline = Date.now() + {timeout_ms};
+                const deadline = Date.now() + {left};
                 const obs = new MutationObserver(() => {{ last = Date.now(); }});
                 obs.observe(document.documentElement, {{
                     subtree: true, childList: true, attributes: true, characterData: true
@@ -878,13 +898,20 @@ impl CdpSession {
                     }}
                 }}, 50);
             }})"#
-        );
-
-        match self.evaluate(&script)? {
-            JsonValue::Bool(true) => Ok(()),
-            _ => Err(format!(
-                "DOM never stayed quiet for {quiet_ms}ms within {timeout_ms}ms"
-            )),
+            );
+            if self.evaluate(&script)? != JsonValue::Bool(true) {
+                return Err(format!(
+                    "DOM never stayed quiet for {quiet_ms}ms within {timeout_ms}ms"
+                ));
+            }
+            self.drain_events()?;
+            let busy = self.inflight.values().filter(|t| t.elapsed() < LONG_POLL).count();
+            if busy == 0 {
+                return Ok(());
+            }
+            if start.elapsed().as_millis() as u64 >= timeout_ms {
+                return Err(format!("{busy} requests still in flight after {timeout_ms}ms"));
+            }
         }
     }
 

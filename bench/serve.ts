@@ -6,7 +6,11 @@ const port = Number(process.argv[2] ?? 4173);
 
 Bun.serve({
   port,
-  fetch(req) {
+  async fetch(req) {
+    if (new URL(req.url).pathname === "/slow") {
+      await Bun.sleep(800);
+      return new Response("ok");
+    }
     const page = pages[new URL(req.url).pathname];
     return page
       ? new Response(page(), { headers: { "content-type": "text/html; charset=utf-8" } })
