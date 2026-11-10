@@ -366,6 +366,10 @@ fn run_step(
         Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
         Step::Url => Outcome::with(session.current_url()?),
         Step::Title => Outcome::with(session.title()?),
+        Step::Text { selector } => {
+            let _ = writeln!(out, "{}", session.page_text(selector.as_deref())?);
+            Outcome::ok()
+        }
         Step::A11y => {
             let found = session.a11y()?;
             if found.is_empty() {
@@ -480,6 +484,7 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Url => "url",
         Step::Title => "title",
         Step::A11y => "a11y",
+        Step::Text { .. } => "text",
         Step::Console { .. } => "console",
         Step::Screenshot { .. } => "screenshot",
         Step::Pdf { .. } => "pdf",

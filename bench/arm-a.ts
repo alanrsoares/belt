@@ -17,8 +17,9 @@ const arg = (name: string, fallback: string): string => {
 const base = arg("--base", "http://localhost:4173");
 const beltBin = arg("--belt", "target/release/belt");
 const runs = Number(arg("--runs", "3"));
-const armB = arg("--arm", "A") === "B";
-const out = arg("--out", `bench/results/arm-${armB ? "b" : "a"}.json`);
+const arm = arg("--arm", "A");
+const armB = arm !== "A"; // B and D use the kept child
+const out = arg("--out", `bench/results/arm-${arm.toLowerCase()}.json`);
 const includeSlow = process.argv.includes("--include-slow");
 
 const est = (chars: number): number => Math.ceil(chars / 4);
@@ -112,7 +113,7 @@ for (const task of tasks) {
   let last: CallResult[] = [];
   for (let r = 0; r < runs; r++) {
     // Arm B drops the leading `-t <dur>`: flags force a one-shot process.
-    const calls = task.armA(base).map((a) => (armB && a[0] === "-t" ? a.slice(2) : a));
+    const calls = (arm === "D" ? (task.armD ?? task.armA) : task.armA)(base).map((a) => (armB && a[0] === "-t" ? a.slice(2) : a));
     const results: CallResult[] = [];
     for (const args of calls) results.push(await callTool(args));
     runsMs.push(results.reduce((sum, c) => sum + c.ms, 0));
@@ -140,7 +141,7 @@ proc.stdin.end();
 proc.kill();
 
 const report = {
-  arm: armB ? "B" : "A",
+  arm,
   date: new Date().toISOString(),
   tokenCounts: "estimate (chars/4), not API counts",
   toolListTokensEst: est(schemaChars),

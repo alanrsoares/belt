@@ -7,6 +7,8 @@ export type Task = {
   name: string;
   /** Each inner array is the argv of one `webdriver` call. */
   armA: (base: string) => string[][];
+  /** Calls for arm D (new verbs); falls back to `armA`. */
+  armD?: (base: string) => string[][];
   /** Text that must appear in the joined results for the task to count as done. */
   expect: string;
   /** Skipped unless `--include-slow` is passed (can block for a long time). */
@@ -21,6 +23,7 @@ export const tasks: Task[] = [
     name: "Read the main text of a long article",
     // No `text` verb yet: `html` is the only full-content read.
     armA: (b) => [[...T, `${b}/article`, "html"]],
+    armD: (b) => [[`${b}/article`, "text"]],
     expect: "ARTICLE-END-MARKER",
   },
   {

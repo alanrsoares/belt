@@ -56,6 +56,9 @@ pub enum Step {
     Url,
     Title,
     A11y,
+    Text {
+        selector: Option<String>,
+    },
     Snapshot {
         all: bool,
     },
@@ -456,6 +459,16 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 steps.push(Step::A11y);
             }
+            "text" => {
+                idx += 1;
+                let selector = if idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
+                    idx += 1;
+                    Some(tokens[idx - 1].clone())
+                } else {
+                    None
+                };
+                steps.push(Step::Text { selector });
+            }
             "console" => {
                 idx += 1;
                 let mut mode = ConsoleMode::Errors;
@@ -573,6 +586,7 @@ fn is_verb(s: &str) -> bool {
             | "url"
             | "title"
             | "a11y"
+            | "text"
             | "console"
             | "snapshot"
             | "aria"
@@ -859,6 +873,13 @@ mod tests {
     fn a11y_is_a_verb() {
         let steps = parse_script("a11y\nurl", 1000).unwrap();
         assert_eq!(steps, vec![Step::A11y, Step::Url]);
+    }
+
+    #[test]
+    fn text_takes_an_optional_selector() {
+        let steps = parse_script("text\ntext article\nurl", 1000).unwrap();
+        assert_eq!(steps[0], Step::Text { selector: None });
+        assert_eq!(steps[1], Step::Text { selector: Some("article".into()) });
     }
 
     #[test]

@@ -243,6 +243,9 @@ pub struct SnapshotNode {
     pub backend_node_id: i64,
 }
 
+/// Longest page text `text` returns, in UTF-16 units.
+const TEXT_LIMIT: usize = 20_000;
+
 pub struct CdpSession {
     ws: WebSocketClient,
     next_id: u64,
@@ -529,6 +532,23 @@ impl CdpSession {
     pub fn a11y(&mut self) -> Result<String, String> {
         let v = self.evaluate(include_str!("a11y.js"))?;
         Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Visible text of `selector`, else of `main`/`article`/body, blank runs
+    /// collapsed and capped. Far cheaper than `get_html` for reading a page.
+    pub fn page_text(&mut self, selector: Option<&str>) -> Result<String, String> {
+        // shortcut: CSS selectors only, no `text=`/`role=` locators; upgrade when agents need them.
+        let pick = match selector {
+            Some(sel) => format!("document.querySelector({})", JsonValue::String(sel.to_string()).to_json_string()),
+            None => "(document.querySelector('main, article, [role=main]') || document.body)".to_string(),
+        };
+        let js = format!(
+            "(()=>{{const e={pick};if(!e)return null;const t=e.innerText.replace(/[ \\t]+\\n/g,'\\n').replace(/\\n{{3,}}/g,'\\n\\n').trim();return t.length>{TEXT_LIMIT}?t.slice(0,{TEXT_LIMIT})+'\\n[truncated '+(t.length-{TEXT_LIMIT})+' chars]':t}})()"
+        );
+        match self.evaluate(&js)?.as_str() {
+            Some(t) => Ok(t.to_string()),
+            None => Err(format!("no element matches '{}'", selector.unwrap_or("body"))),
+        }
     }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<JsonValue, String> {

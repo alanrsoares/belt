@@ -230,6 +230,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} <loc> <text>              Clear then type
     {} <js_expr>                 Evaluate JS, prints JSON result
     {} / {}                   Print current URL / page title
+    {} [css]                    Visible text of main/body or a CSS match (cheaper than html)
     {}                          Basic a11y findings (alt, labels, names, ids, lang); not a WCAG audit
     {} [--errors|--full|--clear]  Buffered console errors, repeats collapsed
     {} [--all]                 Accessibility tree as 'eN role \"name\"' lines
@@ -283,6 +284,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
         c.yellow("eval"),
         c.yellow("url"),
         c.yellow("title"),
+        c.yellow("text"),
         c.yellow("a11y"),
         c.yellow("console"),
         c.yellow("snapshot"),
