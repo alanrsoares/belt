@@ -99,9 +99,53 @@ pub fn split_flag(arg: &str) -> (&str, Option<&str>) {
     (arg, None)
 }
 
+/// The closest candidate to a mistyped `input`, for "did you mean" hints.
+/// Only close matches count: at most a third of the input's length in edits.
+pub fn suggest<'a>(input: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let limit = (input.chars().count() / 3).max(1);
+    candidates
+        .into_iter()
+        .map(|c| (edit_distance(input, c), c))
+        .filter(|&(d, _)| d <= limit)
+        .min_by_key(|&(d, _)| d)
+        .map(|(_, c)| c)
+}
+
+/// Edit distance over chars, counting a swap of two neighbours as one edit
+/// (optimal string alignment), so `tset` is one edit from `test`.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    d[0] = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j - 1] + cost)
+                .min(d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[a.len()][b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggest_picks_close_matches_only() {
+        let names = ["test", "typecheck", "lint"];
+        assert_eq!(suggest("tset", names), Some("test"));
+        assert_eq!(suggest("lnt", names), Some("lint"));
+        assert_eq!(suggest("deploy", names), None);
+        assert_eq!(suggest("--jbos", ["--jobs", "--bail"]), Some("--jobs"));
+    }
 
     #[test]
     fn split_flag_splits_equals_syntax() {

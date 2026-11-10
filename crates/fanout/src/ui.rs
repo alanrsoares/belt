@@ -1,8 +1,8 @@
 //! Terminal rendering, ANSI formatting, and TUI widgets for `fanout`.
 
 pub use local_common::{
-    draw_meter as common_draw_meter, format_duration, strip_ansi, terminal_columns, visible_width,
-    CursorGuard, PALETTE, SPINNER,
+    draw_meter as common_draw_meter, format_duration, strip_ansi, terminal_columns, terminal_rows,
+    visible_width, CursorGuard, PALETTE, SPINNER,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

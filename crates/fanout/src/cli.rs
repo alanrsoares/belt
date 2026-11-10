@@ -18,8 +18,9 @@ FLAGS:
     --bail             Abort remaining tasks on first failure
     --compact          CI report, but silent until a task fails
                        (the report is the default off a TTY or with CI=true)
-    --dry-run          Print the resolved task list and exit without running it
+    --dry-run, --list  Print the resolved task list and exit without running it
     --topological      Enforce topological package dependency order (^build)
+                       (alias: --deps)
     --color            Force ANSI color output
     --no-color         Disable ANSI color output
     -h, --help         Print this help message
@@ -85,7 +86,26 @@ impl Default for Options {
     }
 }
 
-use local_common::{split_flag, ArgCursor};
+use local_common::{split_flag, suggest, ArgCursor};
+
+/// Every long flag `parse` accepts, for "did you mean" hints.
+const LONG_FLAGS: &[&str] = &[
+    "--help",
+    "--version",
+    "--bail",
+    "--compact",
+    "--dry-run",
+    "--list",
+    "--topological",
+    "--deps",
+    "--color",
+    "--no-color",
+    "--since",
+    "--filter",
+    "--timeout",
+    "--tail",
+    "--jobs",
+];
 
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String> {
     let mut opts = Options::default();
@@ -150,7 +170,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Options, String>
                 }
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option '{other}'"));
+                return Err(match suggest(other, LONG_FLAGS.iter().copied()) {
+                    Some(hint) => format!("unknown option '{other}' (did you mean '{hint}'?)"),
+                    None => format!("unknown option '{other}'"),
+                });
             }
             pos => {
                 if !positional_set {
@@ -231,6 +254,14 @@ mod tests {
         assert!(parse(vec!["--dry-run".to_string()]).unwrap().dry_run);
         assert!(parse(vec!["--list".to_string()]).unwrap().dry_run);
         assert!(!parse(vec![]).unwrap().dry_run);
+    }
+
+    #[test]
+    fn unknown_flag_suggests_the_closest() {
+        let err = parse(vec!["--jbos".to_string()]).unwrap_err();
+        assert_eq!(err, "unknown option '--jbos' (did you mean '--jobs'?)");
+        let err = parse(vec!["--wat".to_string()]).unwrap_err();
+        assert_eq!(err, "unknown option '--wat'");
     }
 
     #[test]

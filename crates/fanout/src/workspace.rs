@@ -1,8 +1,10 @@
 //! Workspace and task discovery from JavaScript, Turbo, and Cargo manifests.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use local_common::suggest;
 
 use crate::cli::Options;
 use crate::config;
@@ -409,6 +411,17 @@ pub fn build_tasks(
 
     let config = config::read(root_dir)?;
 
+    // A target no package defines is a typo, not "nothing to do": exiting 0
+    // would turn a CI gate green without running anything.
+    for target in &opts.targets {
+        let known = target == "check"
+            || target == "check:full"
+            || config.as_ref().is_some_and(|c| c.target(target).is_some());
+        if !known {
+            check_script_exists(target, &root_scripts, &pkgs)?;
+        }
+    }
+
     let mut task_specs = Vec::new();
 
     for target in &opts.targets {
@@ -478,6 +491,26 @@ pub fn build_tasks(
     }
 
     Ok((task_specs, pkgs))
+}
+
+fn check_script_exists(target: &str, root: &[String], pkgs: &[WorkspacePkg]) -> Result<(), String> {
+    let all: BTreeSet<&str> = root
+        .iter()
+        .chain(pkgs.iter().flat_map(|p| &p.scripts))
+        .map(String::as_str)
+        .collect();
+    if all.contains(target) {
+        return Ok(());
+    }
+    let mut msg = format!("no package has a '{target}' script");
+    if let Some(hint) = suggest(target, all.iter().copied()) {
+        msg.push_str(&format!(" (did you mean '{hint}'?)"));
+    }
+    if !all.is_empty() {
+        let names: Vec<&str> = all.into_iter().collect();
+        msg.push_str(&format!("\navailable: {}", names.join(", ")));
+    }
+    Err(msg)
 }
 
 fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, String> {
@@ -550,6 +583,23 @@ fn build_cargo_tasks(opts: &Options, root_dir: &Path) -> Result<Vec<TaskSpec>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_script_is_an_error_with_a_hint() {
+        let pkgs = vec![WorkspacePkg {
+            name: "a".into(),
+            dir: PathBuf::from("/a"),
+            scripts: vec!["test".into(), "lint".into()],
+            internal_deps: vec![],
+        }];
+        let root = vec!["build".to_string()];
+        assert!(check_script_exists("test", &root, &pkgs).is_ok());
+        assert!(check_script_exists("build", &root, &pkgs).is_ok());
+        assert_eq!(
+            check_script_exists("tset", &root, &pkgs).unwrap_err(),
+            "no package has a 'tset' script (did you mean 'test'?)\navailable: build, lint, test"
+        );
+    }
 
     #[test]
     fn test_glob_match() {

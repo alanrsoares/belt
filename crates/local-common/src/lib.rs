@@ -21,11 +21,11 @@ pub mod paths;
 pub mod process;
 pub mod term;
 
-pub use cli::{split_flag, ArgCursor, CommonFlags};
+pub use cli::{split_flag, suggest, ArgCursor, CommonFlags};
 pub use paths::{ensure_dir, tool_config_dir, tool_data_dir};
 pub use term::{
     color_enabled_for, draw_meter, file_uri, format_duration, format_size, is_terminal, strip_ansi,
-    terminal_columns, visible_width, Colour, CursorGuard, PALETTE, SPINNER,
+    terminal_columns, terminal_rows, visible_width, Colour, CursorGuard, PALETTE, SPINNER,
 };
 
 /// The shared, human-readable project name. Handy for `--help` strings and
