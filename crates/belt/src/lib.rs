@@ -2,7 +2,7 @@
 //! server (JSON-RPC 2.0, one message per line).
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -130,15 +130,21 @@ fn tool_json(tool: &Tool) -> JsonValue {
 /// Per-call limit, matching `fanout`'s default task timeout.
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-/// Read a pipe to the end on its own thread so a full pipe never blocks the child.
-fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+/// Max bytes kept per stream; the rest is read and discarded.
+pub const OUTPUT_LIMIT: u64 = 1024 * 1024;
+
+/// Read a pipe to the end on its own thread so a full pipe never blocks the
+/// child. Keeps the first [`OUTPUT_LIMIT`] bytes and counts the rest.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<(Vec<u8>, u64)> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut buf = Vec::new();
+        let mut dropped = 0;
         if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf);
+            let _ = (&mut pipe).take(OUTPUT_LIMIT).read_to_end(&mut buf);
+            dropped = io::copy(&mut pipe, &mut io::sink()).unwrap_or(0);
         }
-        let _ = tx.send(buf);
+        let _ = tx.send((buf, dropped));
     });
     rx
 }
@@ -177,9 +183,13 @@ pub fn run_tool(bin: &Path, args: &[String], timeout: Duration) -> (String, bool
     };
 
     // shortcut: a grandchild outside the process group can hold a pipe open; cap the wait.
-    let collect = |rx: mpsc::Receiver<Vec<u8>>| {
-        let bytes = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-        strip_ansi(&String::from_utf8_lossy(&bytes))
+    let collect = |rx: mpsc::Receiver<(Vec<u8>, u64)>| {
+        let (bytes, dropped) = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+        let mut text = strip_ansi(&String::from_utf8_lossy(&bytes));
+        if dropped > 0 {
+            text.push_str(&format!("\n[truncated {dropped} bytes]"));
+        }
+        text
     };
     let mut text = collect(stdout);
     let stderr = collect(stderr);
@@ -441,5 +451,21 @@ mod tests {
         assert!(failed);
         assert!(text.contains("[timeout after 0s]"), "{text}");
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_call_truncates_large_output() {
+        let script = format!("head -c {} /dev/zero | tr '\\0' a", OUTPUT_LIMIT + 10);
+        let (text, failed) = run_tool(Path::new("sh"), &["-c".into(), script], TOOL_TIMEOUT);
+        assert!(!failed);
+        assert!(
+            text.ends_with("\n[truncated 10 bytes]"),
+            "{}",
+            &text[text.len() - 40..]
+        );
+        let body = text.split_once("\n[truncated").unwrap().0;
+        assert_eq!(body.len() as u64, OUTPUT_LIMIT);
+        assert!(body.bytes().all(|b| b == b'a'));
     }
 }
