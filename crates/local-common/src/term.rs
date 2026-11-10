@@ -25,6 +25,7 @@ pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 const EIGHTHS: &[&str] = &["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
 static CACHED_COLS: AtomicUsize = AtomicUsize::new(0);
+static CACHED_ROWS: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether `stream` (e.g. `&mut stdout()`) is an interactive terminal.
 pub fn is_terminal(stream: &impl IsTerminal) -> bool {
@@ -50,15 +51,8 @@ pub fn color_enabled_for(stream: &impl IsTerminal, force_off: bool) -> bool {
     )
 }
 
-fn query_terminal_columns() -> usize {
-    if let Ok(cols_str) = std::env::var("COLUMNS") {
-        if let Ok(cols) = cols_str.parse::<usize>() {
-            if cols > 0 {
-                return cols;
-            }
-        }
-    }
-
+/// `stty size` as `(rows, cols)`, read from the controlling terminal.
+fn stty_size() -> Option<(usize, usize)> {
     #[cfg(unix)]
     {
         let mut cmd = std::process::Command::new("stty");
@@ -66,23 +60,50 @@ fn query_terminal_columns() -> usize {
         if let Ok(tty) = std::fs::File::open("/dev/tty") {
             cmd.stdin(tty);
         }
-        if let Ok(output) = cmd.output() {
-            if output.status.success() {
-                if let Ok(s) = std::str::from_utf8(&output.stdout) {
-                    let parts: Vec<&str> = s.split_whitespace().collect();
-                    if parts.len() == 2 {
-                        if let Ok(cols) = parts[1].parse::<usize>() {
-                            if cols > 0 {
-                                return cols;
-                            }
-                        }
-                    }
-                }
-            }
+        let output = cmd.output().ok().filter(|o| o.status.success())?;
+        let s = std::str::from_utf8(&output.stdout).ok()?;
+        let mut parts = s.split_whitespace().map(|p| p.parse::<usize>().ok());
+        match (parts.next()?, parts.next()?, parts.next()) {
+            (Some(rows), Some(cols), None) if rows > 0 && cols > 0 => Some((rows, cols)),
+            _ => None,
         }
     }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
 
-    80
+fn env_size(var: &str) -> Option<usize> {
+    std::env::var(var)
+        .ok()?
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
+}
+
+fn query_terminal_columns() -> usize {
+    env_size("COLUMNS")
+        .or_else(|| stty_size().map(|(_, cols)| cols))
+        .unwrap_or(80)
+}
+
+fn query_terminal_rows() -> usize {
+    env_size("LINES")
+        .or_else(|| stty_size().map(|(rows, _)| rows))
+        .unwrap_or(24)
+}
+
+/// Get cached terminal height in rows (defaults to 24 if undetermined).
+pub fn terminal_rows() -> usize {
+    let rows = CACHED_ROWS.load(Ordering::Relaxed);
+    if rows > 0 {
+        rows
+    } else {
+        let queried = query_terminal_rows();
+        CACHED_ROWS.store(queried, Ordering::Relaxed);
+        queried
+    }
 }
 
 /// Get cached terminal width in columns (defaults to 80 if undetermined).

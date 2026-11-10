@@ -20,6 +20,9 @@ pub struct TaskNode {
     pub spec: TaskSpec,
     pub depends_on: HashSet<usize>,
     pub dependents: HashSet<usize>,
+    /// Own cost (+1) plus the costliest chain of tasks waiting on this one.
+    /// Higher ranks start first so the critical path is never queued late.
+    pub rank: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +51,7 @@ impl TaskGraph {
                 spec,
                 depends_on: HashSet::new(),
                 dependents: HashSet::new(),
+                rank: 0,
             })
             .collect();
 
@@ -107,13 +111,24 @@ impl TaskGraph {
             }
         }
 
-        let graph = Self { nodes };
-        graph.detect_cycles()?;
+        let mut graph = Self { nodes };
+        let order = graph.topological_order()?;
+        for &i in order.iter().rev() {
+            let downstream = graph.nodes[i]
+                .dependents
+                .iter()
+                .map(|&d| graph.nodes[d].rank)
+                .max()
+                .unwrap_or(0);
+            // +1: a task of unknown (0) cost still lengthens its chain.
+            let own = graph.nodes[i].spec.estimated_cost.saturating_add(1);
+            graph.nodes[i].rank = own.saturating_add(downstream);
+        }
         Ok(graph)
     }
 
-    /// Kahn's algorithm cycle detection and topological sorting.
-    pub fn detect_cycles(&self) -> Result<(), String> {
+    /// Kahn's algorithm: a topological order, or an error on a cycle.
+    fn topological_order(&self) -> Result<Vec<usize>, String> {
         let mut in_degrees: Vec<usize> = self.nodes.iter().map(|n| n.depends_on.len()).collect();
         let mut queue: VecDeque<usize> = VecDeque::new();
 
@@ -123,9 +138,9 @@ impl TaskGraph {
             }
         }
 
-        let mut visited_count = 0;
+        let mut order = Vec::with_capacity(self.nodes.len());
         while let Some(node_idx) = queue.pop_front() {
-            visited_count += 1;
+            order.push(node_idx);
             for &dep_idx in &self.nodes[node_idx].dependents {
                 in_degrees[dep_idx] -= 1;
                 if in_degrees[dep_idx] == 0 {
@@ -134,11 +149,11 @@ impl TaskGraph {
             }
         }
 
-        if visited_count != self.nodes.len() {
+        if order.len() != self.nodes.len() {
             return Err("cyclical task dependency detected in workspace".to_string());
         }
 
-        Ok(())
+        Ok(order)
     }
 
     /// Return tasks with in-degree 0 that can start immediately.
@@ -206,6 +221,10 @@ mod tests {
 
         // Ready tasks should only be @app/core:build (index 1)
         assert_eq!(graph.ready_tasks(), vec![1]);
+
+        // core's rank carries the ui build waiting on it
+        assert_eq!(graph.nodes[0].rank, 2);
+        assert_eq!(graph.nodes[1].rank, 4);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Concurrent execution engine, topological DAG scheduler, and UI event loop for `fanout`.
 
-use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader, Write};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -15,8 +16,8 @@ use crate::cli::Options;
 use crate::dag::{TaskGraph, TurboPipeline};
 use crate::report;
 use crate::ui::{
-    draw_meter, format_duration, phase_icon, phase_text, terminal_columns, visible_width,
-    CursorGuard, Outcome, Styles,
+    draw_meter, format_duration, phase_icon, phase_text, terminal_columns, terminal_rows,
+    visible_width, CursorGuard, Outcome, Styles,
 };
 use crate::workspace::{TaskSpec, WorkspacePkg};
 
@@ -73,12 +74,18 @@ pub struct TaskResult {
 }
 
 struct SchedulerState {
-    queue: VecDeque<usize>,
+    /// Ready tasks keyed by critical-path rank; ties go to the lower index.
+    ready: BinaryHeap<(usize, Reverse<usize>)>,
     in_degrees: Vec<usize>,
     completed: usize,
     active_workers: usize,
     bail: bool,
 }
+
+/// Live view: lines and repaints are batched into frames this long.
+const FRAME: Duration = Duration::from_millis(50);
+/// Live view: spinner step.
+const SPIN: Duration = Duration::from_millis(80);
 
 pub fn execute_tasks(
     tasks: Vec<TaskSpec>,
@@ -123,7 +130,7 @@ pub fn execute_tasks(
 
     // Build task dependency graph
     let graph = match TaskGraph::build(tasks.clone(), &pkgs, pipeline.as_ref(), opts.topological) {
-        Ok(g) => g,
+        Ok(g) => Arc::new(g),
         Err(e) => {
             eprintln!("fanout: {e}");
             return 1;
@@ -133,16 +140,16 @@ pub fn execute_tasks(
     let (tx, rx): (Sender<Event>, Receiver<Event>) = mpsc::channel();
     let bail_flag = Arc::new(AtomicBool::new(false));
 
-    // Initialize scheduler with in-degrees and ready tasks (in-degree == 0)
     let in_degrees: Vec<usize> = graph.nodes.iter().map(|n| n.depends_on.len()).collect();
-    let mut ready_tasks: Vec<usize> = graph.ready_tasks();
-
-    // Sort ready tasks by cost (longest poles first)
-    ready_tasks.sort_by(|&a, &b| tasks[b].estimated_cost.cmp(&tasks[a].estimated_cost));
+    let ready = graph
+        .ready_tasks()
+        .into_iter()
+        .map(|i| (graph.nodes[i].rank, Reverse(i)))
+        .collect();
 
     let scheduler = Arc::new((
         Mutex::new(SchedulerState {
-            queue: VecDeque::from(ready_tasks),
+            ready,
             in_degrees,
             completed: 0,
             active_workers: 0,
@@ -156,8 +163,7 @@ pub fn execute_tasks(
 
     for _ in 0..pool_size {
         let sched = Arc::clone(&scheduler);
-        let tasks_ref = tasks.clone();
-        let graph_ref = graph.clone();
+        let graph_ref = Arc::clone(&graph);
         let tx_clone = tx.clone();
         let bail_ref = Arc::clone(&bail_flag);
         let timeout_ms = opts.timeout_ms;
@@ -172,36 +178,39 @@ pub fn execute_tasks(
                 let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
 
                 loop {
-                    if state.bail || state.completed >= num_tasks || bail_ref.load(Ordering::SeqCst)
-                    {
+                    if state.bail || state.completed >= num_tasks {
                         return;
                     }
 
-                    if let Some(idx) = state.queue.pop_front() {
+                    if let Some((_, Reverse(idx))) = state.ready.pop() {
                         state.active_workers += 1;
                         break idx;
                     }
 
-                    if state.active_workers == 0 && state.queue.is_empty() {
-                        // Deadlock prevention / unreachable remaining tasks
+                    if state.active_workers == 0 {
+                        // Nothing running can unlock the rest (a prerequisite failed).
                         return;
                     }
 
-                    let (new_state, _) = match cvar.wait_timeout(state, Duration::from_millis(50)) {
-                        Ok(pair) => pair,
-                        Err(p) => p.into_inner(),
-                    };
-                    state = new_state;
+                    // Every completion and bail notifies, so no timeout is needed.
+                    state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
                 }
             };
 
             let _ = tx_clone.send(Event::TaskStarted { index: next_idx });
 
-            let spec = &tasks_ref[next_idx];
+            let spec = &graph_ref.nodes[next_idx].spec;
             let task_start = Instant::now();
 
             let (outcome, exit_code, tail) = run_single_task(
-                spec, timeout_ms, tail_cap, &tx_clone, next_idx, &bail_ref, color_opt,
+                spec,
+                timeout_ms,
+                tail_cap,
+                &tx_clone,
+                next_idx,
+                &bail_ref,
+                color_opt,
+                interactive,
             );
 
             let duration = task_start.elapsed();
@@ -224,22 +233,14 @@ pub fn execute_tasks(
                     bail_ref.store(true, Ordering::SeqCst);
                 } else if outcome == Outcome::Passed {
                     // Unlock dependents whose prerequisites have all passed
-                    let mut newly_unlocked: Vec<usize> = Vec::new();
                     for &dep_idx in &graph_ref.nodes[next_idx].dependents {
                         if state.in_degrees[dep_idx] > 0 {
                             state.in_degrees[dep_idx] -= 1;
                             if state.in_degrees[dep_idx] == 0 {
-                                newly_unlocked.push(dep_idx);
+                                let rank = graph_ref.nodes[dep_idx].rank;
+                                state.ready.push((rank, Reverse(dep_idx)));
                             }
                         }
-                    }
-                    newly_unlocked.sort_by(|&a, &b| {
-                        tasks_ref[b]
-                            .estimated_cost
-                            .cmp(&tasks_ref[a].estimated_cost)
-                    });
-                    for dep_idx in newly_unlocked {
-                        state.queue.push_back(dep_idx);
                     }
                 }
 
@@ -263,31 +264,58 @@ pub fn execute_tasks(
         num_tasks
     ];
     let mut results: Vec<Option<TaskResult>> = vec![None; num_tasks];
+    let mut settled = 0;
     let mut painted_lines = 0;
     let mut frame: usize = 0;
     let mut last_tick = Instant::now();
+    let mut last_paint = Instant::now();
+    let mut dirty = false;
+    // Live view: output waiting for the next frame, written above the status block.
+    let mut pending: Vec<u8> = Vec::new();
 
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout());
 
+    if interactive {
+        painted_lines = paint_status_block(
+            &mut out, &tasks, &states, frame, start_time, gutter, &styles,
+        );
+        let _ = out.flush();
+    }
+
     loop {
-        let mut state_changed = false;
         let mut has_output = false;
         let mut disconnected = false;
 
-        loop {
-            let event = match rx.try_recv() {
-                Ok(ev) => ev,
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
-                }
+        let mut incoming = if interactive {
+            let wait = if dirty {
+                FRAME.saturating_sub(last_paint.elapsed())
+            } else {
+                SPIN.saturating_sub(last_tick.elapsed())
             };
+            match rx.recv_timeout(wait) {
+                Ok(ev) => Some(ev),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    None
+                }
+            }
+        } else {
+            match rx.recv() {
+                Ok(ev) => Some(ev),
+                Err(_) => {
+                    disconnected = true;
+                    None
+                }
+            }
+        };
+
+        while let Some(event) = incoming.take() {
             match event {
                 Event::TaskStarted { index } => {
                     states[index].phase = Outcome::Running;
                     states[index].began = Some(Instant::now());
-                    state_changed = true;
+                    dirty = true;
                     if mode == Mode::Report {
                         let _ = out.write_all(report::started(&tasks[index].name).as_bytes());
                         has_output = true;
@@ -298,28 +326,21 @@ pub fn execute_tasks(
                     text,
                     is_stderr,
                 } => {
-                    if !interactive {
-                        // Off the live view only the retained tail is shown.
-                        continue;
-                    }
-                    if painted_lines > 0 {
-                        clear_pinned(&mut out, painted_lines);
-                        painted_lines = 0;
-                    }
-                    has_output = true;
-
+                    // Only sent to the live view.
+                    dirty = true;
                     let spec = &tasks[index];
-                    let prefix = format!(
-                        "{}{}{}{} {}{}",
+                    let _ = writeln!(
+                        pending,
+                        "{}{}{}{} {}{}{}{}",
                         styles.task_color(spec.color_idx),
                         styles.bold(),
                         spec.name.pad_right(gutter),
                         styles.reset(),
                         styles.gray(),
-                        if is_stderr { "┃" } else { "│" }
+                        if is_stderr { "┃" } else { "│" },
+                        styles.reset(),
+                        text
                     );
-                    let rendered = format!("{}{}{}\n", prefix, styles.reset(), text);
-                    let _ = out.write_all(rendered.as_bytes());
                 }
                 Event::TaskFinished {
                     index,
@@ -328,15 +349,10 @@ pub fn execute_tasks(
                     exit_code,
                     tail,
                 } => {
-                    if interactive && painted_lines > 0 {
-                        clear_pinned(&mut out, painted_lines);
-                        painted_lines = 0;
-                    }
-                    has_output = true;
-
                     states[index].phase = outcome;
                     states[index].duration = Some(duration);
-                    state_changed = true;
+                    settled += 1;
+                    dirty = true;
                     let spec = &tasks[index];
 
                     results[index] = Some(TaskResult {
@@ -360,47 +376,59 @@ pub fn execute_tasks(
                             tail.omitted,
                         ),
                     };
-                    let _ = out.write_all(block.as_bytes());
+                    if interactive {
+                        pending.extend_from_slice(block.as_bytes());
+                    } else if !block.is_empty() {
+                        let _ = out.write_all(block.as_bytes());
+                        has_output = true;
+                    }
                 }
             }
+
+            // Stop draining when a frame is due so a noisy task can't starve the repaint.
+            if interactive && dirty && last_paint.elapsed() >= FRAME {
+                break;
+            }
+            incoming = match rx.try_recv() {
+                Ok(ev) => Some(ev),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    None
+                }
+            };
         }
 
-        if last_tick.elapsed() >= Duration::from_millis(80) {
-            frame = frame.wrapping_add(1);
-            last_tick = Instant::now();
-            state_changed = true;
-        }
-
-        if interactive && (state_changed || has_output || painted_lines == 0) {
-            clear_pinned(&mut out, painted_lines);
-            painted_lines = paint_status_block(
-                &mut out, &tasks, &states, frame, start_time, gutter, &styles,
-            );
-            let _ = out.flush();
+        if interactive {
+            if last_tick.elapsed() >= SPIN {
+                frame = frame.wrapping_add(1);
+                last_tick = Instant::now();
+                dirty = true;
+            }
+            if dirty && last_paint.elapsed() >= FRAME {
+                clear_pinned(&mut out, painted_lines);
+                let _ = out.write_all(&pending);
+                pending.clear();
+                painted_lines = paint_status_block(
+                    &mut out, &tasks, &states, frame, start_time, gutter, &styles,
+                );
+                let _ = out.flush();
+                last_paint = Instant::now();
+                dirty = false;
+            }
         } else if has_output {
             // A CI log should show each line as it happens, not at exit.
             let _ = out.flush();
         }
 
-        // Check completion
-        let settled_count = states.iter().filter(|st| st.phase.is_settled()).count();
-        if settled_count == num_tasks || disconnected {
+        if settled == num_tasks || disconnected {
             break;
         }
-
-        // Wake any waiting workers if all active work and queue items are exhausted
-        {
-            let sched_lock = scheduler.0.lock().unwrap_or_else(|e| e.into_inner());
-            if sched_lock.active_workers == 0 && sched_lock.queue.is_empty() {
-                scheduler.1.notify_all();
-            }
-        }
-
-        thread::sleep(Duration::from_millis(15));
     }
 
     if interactive {
         clear_pinned(&mut out, painted_lines);
+        let _ = out.write_all(&pending);
         let _ = out.flush();
     }
 
@@ -491,6 +519,7 @@ pub(crate) fn resolve_runner_bin(bin: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_single_task(
     spec: &TaskSpec,
     timeout_ms: u64,
@@ -499,6 +528,7 @@ fn run_single_task(
     idx: usize,
     bail_ref: &AtomicBool,
     color_opt: bool,
+    stream: bool,
 ) -> (Outcome, i32, Tail) {
     let runner = resolve_runner_bin(&spec.runner_bin);
     let mut cmd = Command::new(&runner);
@@ -516,11 +546,13 @@ fn run_single_task(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx.send(Event::TaskLine {
-                index: idx,
-                text: format!("spawn failed: {e}"),
-                is_stderr: true,
-            });
+            if stream {
+                let _ = tx.send(Event::TaskLine {
+                    index: idx,
+                    text: format!("spawn failed: {e}"),
+                    is_stderr: true,
+                });
+            }
             let tail = Tail {
                 lines: vec![format!("spawn error: {e}")],
                 omitted: 0,
@@ -529,45 +561,39 @@ fn run_single_task(
         }
     };
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
     let collected_tail = Arc::new(Mutex::new((VecDeque::new(), 0usize)));
+    // Each reader reports EOF here; the exit check then polls fast.
+    let (eof_tx, eof_rx) = mpsc::channel::<()>();
 
-    let t1_tail = Arc::clone(&collected_tail);
-    let t1_tx = tx.clone();
-    let h_stdout = thread::spawn(move || {
-        if let Some(pipe) = stdout_pipe {
-            let reader = BufReader::new(pipe);
-            for line in reader.lines().map_while(Result::ok) {
-                push_tail(&t1_tail, &line, tail_cap);
-                let _ = t1_tx.send(Event::TaskLine {
-                    index: idx,
-                    text: line,
-                    is_stderr: false,
-                });
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .zip([false, true])
+    .map(|(pipe, is_stderr)| {
+        let tail = Arc::clone(&collected_tail);
+        let tx = stream.then(|| tx.clone());
+        let eof_tx = eof_tx.clone();
+        thread::spawn(move || {
+            if let Some(pipe) = pipe {
+                pump_lines(pipe, idx, is_stderr, &tail, tail_cap, tx.as_ref());
             }
-        }
-    });
-
-    let t2_tail = Arc::clone(&collected_tail);
-    let t2_tx = tx.clone();
-    let h_stderr = thread::spawn(move || {
-        if let Some(pipe) = stderr_pipe {
-            let reader = BufReader::new(pipe);
-            for line in reader.lines().map_while(Result::ok) {
-                push_tail(&t2_tail, &line, tail_cap);
-                let _ = t2_tx.send(Event::TaskLine {
-                    index: idx,
-                    text: line,
-                    is_stderr: true,
-                });
-            }
-        }
-    });
+            let _ = eof_tx.send(());
+        })
+    })
+    .collect();
+    drop(eof_tx);
 
     let task_start = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut open_pipes = readers.len();
 
     let (outcome, exit_code) = loop {
         if bail_ref.load(Ordering::SeqCst) {
@@ -589,17 +615,24 @@ fn run_single_task(
                     break (Outcome::Failed(code), code);
                 }
             }
-            Ok(None) => {
-                thread::sleep(Duration::from_millis(20));
-            }
+            Ok(None) => {}
             Err(_) => {
                 break (Outcome::Failed(1), 1);
             }
         }
+
+        // Both pipes closed almost always means the child is exiting, so
+        // check again soon; until then a pipe closing wakes this early.
+        if open_pipes == 0 {
+            thread::sleep(Duration::from_millis(5));
+        } else if eof_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
+            open_pipes -= 1;
+        }
     };
 
-    let _ = h_stdout.join();
-    let _ = h_stderr.join();
+    for r in readers {
+        let _ = r.join();
+    }
 
     let tail = {
         let lock = match collected_tail.lock() {
@@ -613,6 +646,45 @@ fn run_single_task(
     };
 
     (outcome, exit_code, tail)
+}
+
+/// Read `pipe` line by line into the tail (and the live view when `tx` is
+/// set). Bytes that are not UTF-8 are replaced, never a reason to stop
+/// draining: an undrained pipe kills or stalls the child.
+fn pump_lines(
+    pipe: impl Read,
+    idx: usize,
+    is_stderr: bool,
+    tail: &Mutex<(VecDeque<String>, usize)>,
+    tail_cap: usize,
+    tx: Option<&Sender<Event>>,
+) {
+    let mut reader = BufReader::new(pipe);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(trim_eol(&buf)).into_owned();
+        push_tail(tail, &line, tail_cap);
+        if let Some(tx) = tx {
+            let _ = tx.send(Event::TaskLine {
+                index: idx,
+                text: line,
+                is_stderr,
+            });
+        }
+    }
+}
+
+/// Strip one trailing `\n` or `\r\n`, as `BufRead::lines` does.
+fn trim_eol(buf: &[u8]) -> &[u8] {
+    match buf.strip_suffix(b"\n") {
+        Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
+        None => buf,
+    }
 }
 
 /// Retain `line` in a task's tail, keeping at most `cap` lines (0 = all) and
@@ -680,8 +752,24 @@ fn paint_status_block(
     );
     lines.push(header);
 
-    // One line per task
-    for (i, spec) in tasks.iter().enumerate() {
+    // One line per task, capped so the block never scrolls off the top:
+    // `clear_pinned` can't move above the first row. Running tasks win,
+    // then pending; settled ones already have a verdict line above.
+    let budget = terminal_rows().saturating_sub(4).max(1);
+    let mut shown: Vec<usize> = (0..tasks.len()).collect();
+    if shown.len() > budget {
+        shown.sort_by_key(|&i| match states[i].phase {
+            Outcome::Running => 0,
+            Outcome::Pending => 1,
+            _ => 2,
+        });
+        shown.truncate(budget);
+        shown.sort_unstable();
+    }
+    let hidden = tasks.len() - shown.len();
+
+    for i in shown {
+        let spec = &tasks[i];
         let st = &states[i];
         let icon = phase_icon(st.phase, s, frame);
         let color = s.task_color(spec.color_idx);
@@ -711,6 +799,9 @@ fn paint_status_block(
             s.reset()
         );
         lines.push(line);
+    }
+    if hidden > 0 {
+        lines.push(format!("  {}… {hidden} more{}", s.gray(), s.reset()));
     }
 
     let count = lines.len();

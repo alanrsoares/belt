@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::workspace::WorkspacePkg;
 
@@ -33,62 +33,44 @@ pub fn find_changed_files(root_dir: &Path, since_ref: &str) -> Result<Vec<PathBu
 
     let mut files = HashSet::new();
 
-    // 1. Commits diff against since_ref
+    // Working-tree state (staged, unstaged, untracked) in one call, started
+    // now so it runs while the ref diff below does.
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+        .current_dir(root_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+
+    // Commits diff against since_ref
     let diff_target = format!("{since_ref}...HEAD");
     let three_dot = Command::new("git")
-        .args(["diff", "--name-only", &diff_target])
+        .args(["diff", "--name-only", "-z", &diff_target])
         .current_dir(root_dir)
         .output();
 
     match three_dot {
         Ok(output) if output.status.success() => {
-            parse_git_lines(&output.stdout, &mut files);
+            parse_nul_paths(&output.stdout, &mut files);
         }
         _ => {
             // Fallback to direct two-dot diff or single ref if 3-dot fails
             let fallback = Command::new("git")
-                .args(["diff", "--name-only", since_ref])
+                .args(["diff", "--name-only", "-z", since_ref])
                 .current_dir(root_dir)
                 .output()
                 .map_err(|e| format!("failed to run git diff: {e}"))?;
             if fallback.status.success() {
-                parse_git_lines(&fallback.stdout, &mut files);
+                parse_nul_paths(&fallback.stdout, &mut files);
             } else {
                 return Err(format!("unknown or invalid git ref '{since_ref}'"));
             }
         }
     }
 
-    // 2. Unstaged working tree changes
-    if let Ok(output) = Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(root_dir)
-        .output()
-    {
+    if let Ok(output) = status.and_then(|child| child.wait_with_output()) {
         if output.status.success() {
-            parse_git_lines(&output.stdout, &mut files);
-        }
-    }
-
-    // 3. Staged changes
-    if let Ok(output) = Command::new("git")
-        .args(["diff", "--cached", "--name-only"])
-        .current_dir(root_dir)
-        .output()
-    {
-        if output.status.success() {
-            parse_git_lines(&output.stdout, &mut files);
-        }
-    }
-
-    // 4. Untracked files
-    if let Ok(output) = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(root_dir)
-        .output()
-    {
-        if output.status.success() {
-            parse_git_lines(&output.stdout, &mut files);
+            parse_status_z(&output.stdout, &mut files);
         }
     }
 
@@ -97,12 +79,24 @@ pub fn find_changed_files(root_dir: &Path, since_ref: &str) -> Result<Vec<PathBu
     Ok(result)
 }
 
-fn parse_git_lines(stdout: &[u8], out: &mut HashSet<PathBuf>) {
-    let s = String::from_utf8_lossy(stdout);
-    for line in s.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            out.insert(PathBuf::from(trimmed));
+/// NUL-separated paths, as printed by `git diff --name-only -z`.
+fn parse_nul_paths(stdout: &[u8], out: &mut HashSet<PathBuf>) {
+    for path in stdout.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        out.insert(PathBuf::from(String::from_utf8_lossy(path).as_ref()));
+    }
+}
+
+/// `git status --porcelain -z`: `XY path` entries; a rename or copy is
+/// followed by its source path, which counts as changed too.
+fn parse_status_z(stdout: &[u8], out: &mut HashSet<PathBuf>) {
+    let mut entries = stdout.split(|&b| b == 0).filter(|e| !e.is_empty());
+    while let Some(entry) = entries.next() {
+        let Some(path) = entry.get(3..) else { continue };
+        out.insert(PathBuf::from(String::from_utf8_lossy(path).as_ref()));
+        if entry[..2].iter().any(|&c| c == b'R' || c == b'C') {
+            if let Some(source) = entries.next() {
+                out.insert(PathBuf::from(String::from_utf8_lossy(source).as_ref()));
+            }
         }
     }
 }
@@ -244,6 +238,19 @@ mod tests {
         // With dependents: @app/core and @app/ui (docs is unaffected)
         let with_deps = resolve_affected_packages(&pkgs, &changed, Path::new("/root"), true);
         assert_eq!(with_deps, vec!["@app/core", "@app/ui"]);
+    }
+
+    #[test]
+    fn status_z_keeps_rename_sources_and_spaces() {
+        let raw = b" M a/x.ts\0R  b/new.ts\0a/old.ts\0?? c/my file.ts\0";
+        let mut out = HashSet::new();
+        parse_status_z(raw, &mut out);
+        let mut got: Vec<_> = out.into_iter().collect();
+        got.sort();
+        assert_eq!(
+            got,
+            ["a/old.ts", "a/x.ts", "b/new.ts", "c/my file.ts"].map(PathBuf::from)
+        );
     }
 
     #[test]
