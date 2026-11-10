@@ -444,6 +444,11 @@ fn run_step(
         }
     }
 
+    // Shown even with --quiet: the page changed without the agent asking.
+    for note in session.take_dialogs() {
+        let _ = writeln!(out, "{} dialog {note} (auto-accepted)", c.yellow("note"));
+    }
+
     Ok(Flow::Continue)
 }
 

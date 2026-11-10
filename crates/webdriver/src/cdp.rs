@@ -253,6 +253,8 @@ pub struct CdpSession {
     target_frame: Option<String>,
     /// Last `snapshot` result, keyed by the `eN` reference handed to the agent.
     refs: HashMap<String, i64>,
+    /// Dialogs auto-accepted since the last `take_dialogs`, for the agent to see.
+    dialogs: Vec<String>,
 }
 
 impl CdpSession {
@@ -265,7 +267,49 @@ impl CdpSession {
             contexts: Vec::new(),
             target_frame: None,
             refs: HashMap::new(),
+            dialogs: Vec::new(),
         }
+    }
+
+    /// Dialogs auto-accepted since the last call, as `kind "message"` notes.
+    pub fn take_dialogs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dialogs)
+    }
+
+    /// An open JS dialog freezes the page, and every CDP command behind it
+    /// stalls. Accept it at once and keep a note; `prompt` takes its default.
+    fn accept_dialog(&mut self, params: Option<&JsonValue>) -> Result<(), String> {
+        let text = |key: &str| {
+            params
+                .and_then(|p| p.get(key))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let (kind, message) = (text("type"), text("message"));
+        let mut shown: String = message.chars().take(120).collect();
+        if message.chars().count() > 120 {
+            shown.push('…');
+        }
+        self.dialogs.push(format!("{kind} {shown:?}"));
+
+        let mut reply = HashMap::new();
+        reply.insert("accept".to_string(), JsonValue::Bool(true));
+        reply.insert(
+            "promptText".to_string(),
+            JsonValue::String(text("defaultPrompt")),
+        );
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut req = HashMap::new();
+        req.insert("id".to_string(), JsonValue::Number(id as f64));
+        req.insert(
+            "method".to_string(),
+            JsonValue::String("Page.handleJavaScriptDialog".to_string()),
+        );
+        req.insert("params".to_string(), JsonValue::Object(reply));
+        // The reply carries an id nobody waits for; `call` skips unknown ids.
+        self.ws.send_text(&JsonValue::Object(req).to_json_string())
     }
 
     pub fn set_default_timeout(&mut self, timeout_ms: u64) {
@@ -408,6 +452,9 @@ impl CdpSession {
             let msg = self.ws.read_text()?;
             let val = json::parse(&msg)?;
             self.record_event(&val);
+            if val.get("method").and_then(|m| m.as_str()) == Some("Page.javascriptDialogOpening") {
+                self.accept_dialog(val.get("params"))?;
+            }
 
             if let Some(id_val) = val.get("id") {
                 if id_val.as_i64() == Some(req_id as i64) {
