@@ -23,6 +23,9 @@ pub struct CliOptions {
     /// Read and execute one command per line from stdin, streaming results back
     /// as each finishes, so the browser stays open across an interactive drive.
     pub stream_stdin: bool,
+    /// In `--repl`, print this line after each stdin command so a driver can
+    /// tell where one command's output ends.
+    pub end_marker: Option<String>,
 }
 
 pub enum Action {
@@ -53,6 +56,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> 
     let mut script_file = None;
     let mut read_stdin = false;
     let mut keep_going = false;
+    let mut end_marker = None;
 
     let mut step_tokens = Vec::new();
     let mut has_args = false;
@@ -113,6 +117,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> 
             "--keep-going" | "--no-fail-fast" => {
                 keep_going = true;
             }
+            "--end-marker" => {
+                let marker = cursor
+                    .require_value("--end-marker", inline)
+                    .map_err(|_| "--end-marker requires a text value".to_string())?;
+                end_marker = Some(marker);
+            }
             "-v" | "--verbose" => {
                 verbose = true;
             }
@@ -165,6 +175,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> 
         steps,
         keep_going,
         stream_stdin: read_stdin,
+        end_marker,
     }))
 }
 
@@ -240,6 +251,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     -f, --file <path>           Read a script file instead of CLI verbs
         --repl, -               Stream commands from stdin, one per line
         --keep-going            Continue after a failed step (default: stop)
+        --end-marker TEXT       In --repl, print TEXT on its own line after each command
         --headed                Show browser UI window (disable headless mode)
     -q, --quiet                 Print only steps that carry a payload
     -v, --verbose               Step numbers and timings

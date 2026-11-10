@@ -2,10 +2,10 @@
 //! server (JSON-RPC 2.0, one message per line).
 
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -215,6 +215,157 @@ pub fn run_tool(bin: &Path, args: &[String], timeout: Duration) -> (String, bool
     (text, failed)
 }
 
+/// Longest wait for one command on the kept `webdriver` child.
+const REPL_TIMEOUT: Duration = Duration::from_secs(120);
+
+enum ReplLine {
+    Out(String),
+    Err(String),
+}
+
+/// A `webdriver --repl` child kept alive between MCP calls, so the browser
+/// launches once and the page survives from one call to the next.
+struct Repl {
+    child: Child,
+    stdin: ChildStdin,
+    rx: mpsc::Receiver<ReplLine>,
+    marker: String,
+}
+
+static REPL: Mutex<Option<Repl>> = Mutex::new(None);
+
+fn pipe_lines(
+    pipe: impl Read + Send + 'static,
+    tx: mpsc::Sender<ReplLine>,
+    wrap: fn(String) -> ReplLine,
+) {
+    thread::spawn(move || {
+        for line in BufReader::new(pipe).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(wrap(line)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+impl Repl {
+    fn spawn(bin: &Path) -> Result<Repl, String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let marker = format!("@@belt-end-{}-{nanos:x}@@", std::process::id());
+        let mut cmd = Command::new(bin);
+        cmd.args(["--repl", "--keep-going", "--end-marker", &marker])
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        own_process_group(&mut cmd);
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| format!("failed to run {}: {err}", bin.display()))?;
+        let stdin = child.stdin.take().ok_or("no stdin on webdriver child")?;
+        let (tx, rx) = mpsc::channel();
+        if let Some(out) = child.stdout.take() {
+            pipe_lines(out, tx.clone(), ReplLine::Out);
+        }
+        if let Some(err) = child.stderr.take() {
+            pipe_lines(err, tx, ReplLine::Err);
+        }
+        Ok(Repl {
+            child,
+            stdin,
+            rx,
+            marker,
+        })
+    }
+
+    /// Send one command line and collect its output up to the end marker.
+    /// `Err` means the child is dead or stuck and must be dropped.
+    fn send(&mut self, args: &[String]) -> Result<(String, bool), String> {
+        let line = args.iter().map(|a| quote_token(a)).collect::<Vec<_>>().join(" ");
+        writeln!(self.stdin, "{line}")
+            .and_then(|()| self.stdin.flush())
+            .map_err(|err| format!("webdriver child is gone: {err}"))?;
+
+        let deadline = Instant::now() + REPL_TIMEOUT;
+        let (mut text, mut errs) = (String::new(), String::new());
+        let (mut failed, mut dropped) = (false, 0usize);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(left) {
+                Ok(ReplLine::Out(l)) if l == self.marker => break,
+                Ok(ReplLine::Out(l)) => {
+                    failed |= l.starts_with("err ");
+                    if text.len() as u64 > OUTPUT_LIMIT {
+                        dropped += l.len() + 1;
+                    } else {
+                        text.push_str(&strip_ansi(&l));
+                        text.push('\n');
+                    }
+                }
+                Ok(ReplLine::Err(l)) => {
+                    errs.push_str(&strip_ansi(&l));
+                    errs.push('\n');
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!("[timeout after {}s]", REPL_TIMEOUT.as_secs()));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!("webdriver child exited\n{text}{errs}"));
+                }
+            }
+        }
+        if dropped > 0 {
+            text.push_str(&format!("[truncated {dropped} bytes]\n"));
+        }
+        if !errs.trim().is_empty() {
+            text.push_str("[stderr]\n");
+            text.push_str(&errs);
+        }
+        Ok((text.trim_end().to_string(), failed))
+    }
+}
+
+/// Wrap a token so the `webdriver` line tokenizer reads it back unchanged.
+fn quote_token(tok: &str) -> String {
+    format!("\"{}\"", tok.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The kept child takes one-line commands only. Leading flags (`--help`,
+/// `-t`, `--session`) and multi-line tokens still need a one-shot process.
+fn repl_eligible(args: &[String]) -> bool {
+    args.first().is_some_and(|a| !a.starts_with('-'))
+        && !args.iter().any(|a| a.contains(['\n', '\r']))
+}
+
+fn run_webdriver(bin: &Path, args: &[String]) -> (String, bool) {
+    let mut guard = REPL.lock().unwrap_or_else(|e| e.into_inner());
+    for attempt in 0..2 {
+        if guard.is_none() {
+            match Repl::spawn(bin) {
+                Ok(repl) => *guard = Some(repl),
+                Err(err) => return (err, true),
+            }
+        }
+        let Some(repl) = guard.as_mut() else { break };
+        match repl.send(args) {
+            Ok(reply) => return reply,
+            Err(err) => {
+                if let Some(mut dead) = guard.take() {
+                    terminate(&mut dead.child);
+                }
+                // A write failure on a stale child is safe to retry once.
+                if attempt == 1 || !err.starts_with("webdriver child is gone") {
+                    return (err, true);
+                }
+            }
+        }
+    }
+    ("webdriver child unavailable".to_string(), true)
+}
+
 fn call(
     params: Option<&JsonValue>,
     resolve: &dyn Fn(&str) -> PathBuf,
@@ -236,7 +387,15 @@ fn call(
             .ok_or("`args` must be an array of strings")?,
         Some(_) => return Err("`args` must be an array of strings".to_string()),
     };
-    let (text, failed) = run_tool(&resolve(tool.name), &args, TOOL_TIMEOUT);
+    let bin = resolve(tool.name);
+    let (text, failed) = if tool.name == "webdriver"
+        && repl_eligible(&args)
+        && std::env::var_os("BELT_MCP_ONESHOT").is_none()
+    {
+        run_webdriver(&bin, &args)
+    } else {
+        run_tool(&bin, &args, TOOL_TIMEOUT)
+    };
     Ok(obj(vec![
         (
             "content",
@@ -319,6 +478,17 @@ mod tests {
 
     fn reply(line: &str) -> JsonValue {
         parse(&handle(line, &|n| PathBuf::from(n)).expect("reply")).expect("json")
+    }
+
+    #[test]
+    fn repl_quoting_round_trips_and_gates_eligibility() {
+        assert_eq!(quote_token(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+        let v = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(repl_eligible(&v(&["http://x", "html"])));
+        assert!(!repl_eligible(&v(&["--help"])));
+        assert!(!repl_eligible(&v(&["-t", "10s", "http://x"])));
+        assert!(!repl_eligible(&v(&["eval", "a\nb"])));
+        assert!(!repl_eligible(&[]));
     }
 
     #[test]

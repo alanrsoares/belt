@@ -183,6 +183,9 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
                 Err(e) => {
                     failures += 1;
                     let _ = writeln!(out, "{} {e}", c.red("err"));
+                    if let Some(m) = &opts.end_marker {
+                        let _ = writeln!(out, "{m}");
+                    }
                     let _ = out.flush();
                     if !opts.keep_going {
                         break;
@@ -209,6 +212,9 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
                         }
                     }
                 }
+            }
+            if let Some(m) = &opts.end_marker {
+                let _ = writeln!(out, "{m}");
             }
             let _ = out.flush();
             if stop {
@@ -647,6 +653,7 @@ mod tests {
             steps: steps.clone(),
             keep_going: true,
             stream_stdin: false,
+            end_marker: None,
         };
 
         let mut step_num = 0;
