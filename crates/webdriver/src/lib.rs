@@ -25,6 +25,8 @@ const NEAR_BLANK_PNG_BYTES: usize = 5_000;
 
 /// Cap on `snapshot` output, so a huge page cannot flood the transcript.
 const SNAPSHOT_NODE_LIMIT: usize = 200;
+/// Most matches `find` prints.
+const FIND_LIMIT: usize = 20;
 
 /// Longest console line kept in `--errors` mode.
 const CONSOLE_LINE_LIMIT: usize = 200;
@@ -363,6 +365,25 @@ fn run_step(
                 if nodes.len() == 1 { "" } else { "s" }
             ))
         }
+        Step::Find { query } => {
+            // The whole tree is numbered, so a match keeps a ref `click` accepts.
+            let all = session.snapshot(false, usize::MAX)?;
+            let needle = query.to_lowercase();
+            let hits: Vec<_> = all
+                .iter()
+                .filter(|n| {
+                    n.name.to_lowercase().contains(&needle) || n.role.to_lowercase() == needle
+                })
+                .collect();
+            for node in hits.iter().take(FIND_LIMIT) {
+                let _ = writeln!(out, "{} {} \"{}\"", node.reference, node.role, node.name);
+            }
+            if hits.len() > FIND_LIMIT {
+                Outcome::warn(format!("{} matches, first {FIND_LIMIT} shown; narrow the query", hits.len()))
+            } else {
+                Outcome::with(format!("{} match{}", hits.len(), if hits.len() == 1 { "" } else { "es" }))
+            }
+        }
         Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
         Step::Url => Outcome::with(session.current_url()?),
         Step::Title => Outcome::with(session.title()?),
@@ -484,6 +505,7 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Url => "url",
         Step::Title => "title",
         Step::A11y => "a11y",
+        Step::Find { .. } => "find",
         Step::Text { .. } => "text",
         Step::Console { .. } => "console",
         Step::Screenshot { .. } => "screenshot",

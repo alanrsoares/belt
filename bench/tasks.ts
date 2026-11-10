@@ -85,6 +85,10 @@ export const tasks: Task[] = [
     id: "t5-nav300",
     name: "Find and click 'Link 250' in a 300-link nav bar",
     // The snapshot cap is 200 nodes, so 'Link 250' should be missing from it.
+    armD: (b) => [
+      [`${b}/nav300`, "find", "Link 250"],
+      ["click", "ref=e250", "url"],
+    ],
     armA: (b) => [
       [...T, `${b}/nav300`, "snapshot"],
       [...T, `${b}/nav300`, "click", "role=link:Link 250", "url"],

@@ -56,6 +56,9 @@ pub enum Step {
     Url,
     Title,
     A11y,
+    Find {
+        query: String,
+    },
     Text {
         selector: Option<String>,
     },
@@ -459,6 +462,16 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 steps.push(Step::A11y);
             }
+            "find" => {
+                idx += 1;
+                let query = tokens
+                    .get(idx)
+                    .filter(|t| !is_verb(t))
+                    .cloned()
+                    .ok_or("find requires a query (role or name text)")?;
+                idx += 1;
+                steps.push(Step::Find { query });
+            }
             "text" => {
                 idx += 1;
                 let selector = if idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
@@ -587,6 +600,7 @@ fn is_verb(s: &str) -> bool {
             | "title"
             | "a11y"
             | "text"
+            | "find"
             | "console"
             | "snapshot"
             | "aria"
@@ -880,6 +894,13 @@ mod tests {
         let steps = parse_script("text\ntext article\nurl", 1000).unwrap();
         assert_eq!(steps[0], Step::Text { selector: None });
         assert_eq!(steps[1], Step::Text { selector: Some("article".into()) });
+    }
+
+    #[test]
+    fn find_needs_a_query() {
+        let steps = parse_script("find 'Link 250'", 1000).unwrap();
+        assert_eq!(steps, vec![Step::Find { query: "Link 250".into() }]);
+        assert!(parse_script("find", 1000).is_err());
     }
 
     #[test]

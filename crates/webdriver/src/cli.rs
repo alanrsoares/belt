@@ -230,6 +230,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} <loc> <text>              Clear then type
     {} <js_expr>                 Evaluate JS, prints JSON result
     {} / {}                   Print current URL / page title
+    {} <query>                  Interactive nodes whose name contains the text, or whose role matches; refs work with click
     {} [css]                    Visible text of main/body or a CSS match (cheaper than html)
     {}                          Basic a11y findings (alt, labels, names, ids, lang); not a WCAG audit
     {} [--errors|--full|--clear]  Buffered console errors, repeats collapsed
@@ -284,6 +285,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
         c.yellow("eval"),
         c.yellow("url"),
         c.yellow("title"),
+        c.yellow("find"),
         c.yellow("text"),
         c.yellow("a11y"),
         c.yellow("console"),

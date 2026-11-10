@@ -243,6 +243,40 @@ pub struct SnapshotNode {
     pub backend_node_id: i64,
 }
 
+/// AX nodes in reading order: iterative pre-order DFS from each root, children
+/// in `childIds` order. Chrome returns a flat list in no useful order, so the
+/// node cap would otherwise hide arbitrary nodes. An ignored node still passes
+/// its children on, and a visited set guards against malformed cycles.
+fn ax_reading_order(nodes: &[JsonValue]) -> Vec<&JsonValue> {
+    let id_of = |n: &JsonValue| n.get("nodeId").and_then(|i| i.as_str()).map(str::to_string);
+    let index: HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| id_of(n).map(|id| (id, i)))
+        .collect();
+    let is_root = |n: &JsonValue| {
+        n.get("parentId")
+            .and_then(|p| p.as_str())
+            .is_none_or(|p| !index.contains_key(p))
+    };
+    // Reverse so popping from the stack yields roots and children in order.
+    let mut stack: Vec<usize> = (0..nodes.len()).rev().filter(|&i| is_root(&nodes[i])).collect();
+    let mut seen = vec![false; nodes.len()];
+    let mut out = Vec::with_capacity(nodes.len());
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        out.push(&nodes[i]);
+        if let Some(kids) = nodes[i].get("childIds").and_then(|c| c.as_array()) {
+            stack.extend(kids.iter().rev().filter_map(|k| k.as_str().and_then(|k| index.get(k)).copied()));
+        }
+    }
+    // Nodes unreachable from any root (broken links) go last rather than vanish.
+    out.extend((0..nodes.len()).filter(|&i| !seen[i]).map(|i| &nodes[i]));
+    out
+}
+
 /// Longest page text `text` returns, in UTF-16 units.
 const TEXT_LIMIT: usize = 20_000;
 
@@ -1069,7 +1103,7 @@ impl CdpSession {
         self.refs.clear();
         let mut out = Vec::new();
 
-        for node in nodes {
+        for node in ax_reading_order(&nodes) {
             if node.get("ignored").and_then(|i| i.as_bool()) == Some(true) {
                 continue;
             }
@@ -1312,6 +1346,26 @@ fn truncate_middle(s: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ax_reading_order_is_preorder_and_survives_bad_links() {
+        let raw = r#"[
+            {"nodeId":"b","parentId":"r","childIds":["d"]},
+            {"nodeId":"r","childIds":["c","b"]},
+            {"nodeId":"d","parentId":"b","childIds":["r"]},
+            {"nodeId":"c","parentId":"r","childIds":["missing"]},
+            {"nodeId":"orphan","parentId":"gone"}
+        ]"#;
+        let nodes = json::parse(raw).unwrap();
+        let nodes = nodes.as_array().unwrap();
+        let ids: Vec<&str> = ax_reading_order(nodes)
+            .iter()
+            .map(|n| n.get("nodeId").unwrap().as_str().unwrap())
+            .collect();
+        // Roots in list order: r, then orphan (its parent is not in the list).
+        // Under r: c before b (childIds order), then d; the d->r cycle is cut.
+        assert_eq!(ids, vec!["r", "c", "b", "d", "orphan"]);
+    }
+
     use super::*;
     use std::net::TcpListener;
     use std::thread;
