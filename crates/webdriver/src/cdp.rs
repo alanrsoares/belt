@@ -290,6 +290,9 @@ pub struct CdpSession {
     target_frame: Option<String>,
     /// Last `snapshot` result, keyed by the `eN` reference handed to the agent.
     refs: HashMap<String, i64>,
+    /// DOM node -> its `eN`, so a node keeps its ref across snapshots of one document.
+    ref_of: HashMap<i64, String>,
+    next_ref: usize,
     /// Dialogs auto-accepted since the last `take_dialogs`, for the agent to see.
     dialogs: Vec<String>,
 }
@@ -304,6 +307,8 @@ impl CdpSession {
             contexts: Vec::new(),
             target_frame: None,
             refs: HashMap::new(),
+            ref_of: HashMap::new(),
+            next_ref: 1,
             dialogs: Vec::new(),
         }
     }
@@ -400,7 +405,13 @@ impl CdpSession {
                     self.contexts.retain(|c| c.id != id);
                 }
             }
-            "Runtime.executionContextsCleared" => self.contexts.clear(),
+            "Runtime.executionContextsCleared" => {
+                self.contexts.clear();
+                // New document: old DOM node ids are dead, so restart the refs.
+                self.refs.clear();
+                self.ref_of.clear();
+                self.next_ref = 1;
+            }
             _ => {}
         }
 
@@ -1100,7 +1111,6 @@ impl CdpSession {
             .map(<[JsonValue]>::to_vec)
             .unwrap_or_default();
 
-        self.refs.clear();
         let mut out = Vec::new();
 
         for node in ax_reading_order(&nodes) {
@@ -1131,7 +1141,15 @@ impl CdpSession {
                 continue;
             }
 
-            let reference = format!("e{}", out.len() + 1);
+            let next = &mut self.next_ref;
+            let reference = self
+                .ref_of
+                .entry(backend_node_id)
+                .or_insert_with(|| {
+                    *next += 1;
+                    format!("e{}", *next - 1)
+                })
+                .clone();
             self.refs.insert(reference.clone(), backend_node_id);
             out.push(SnapshotNode {
                 reference,
