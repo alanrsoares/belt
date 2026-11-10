@@ -17,7 +17,7 @@ use crate::dag::{TaskGraph, TurboPipeline};
 use crate::report;
 use crate::ui::{
     draw_meter, format_duration, phase_icon, phase_text, terminal_columns, terminal_rows,
-    visible_width, CursorGuard, Outcome, Styles,
+    visible_width, Outcome, Styles,
 };
 use crate::workspace::{TaskSpec, WorkspacePkg};
 
@@ -86,6 +86,8 @@ struct SchedulerState {
 const FRAME: Duration = Duration::from_millis(50);
 /// Live view: spinner step.
 const SPIN: Duration = Duration::from_millis(80);
+/// Live summary: rows shown before passing tasks fold into "… N more".
+const SUMMARY_ROWS: usize = 10;
 
 pub fn execute_tasks(
     tasks: Vec<TaskSpec>,
@@ -95,7 +97,13 @@ pub fn execute_tasks(
 ) -> i32 {
     let num_tasks = tasks.len();
     if num_tasks == 0 {
-        println!("no tasks to run");
+        // A typo'd script errors earlier; an empty scope is a valid no-op.
+        let why = match (&opts.since, &opts.filter) {
+            (Some(r), _) => format!(": no affected packages since {r}"),
+            (None, Some(f)) => format!(": no packages match --filter {f}"),
+            (None, None) => String::new(),
+        };
+        println!("no tasks to run{why}");
         return 0;
     }
 
@@ -118,7 +126,6 @@ pub fn execute_tasks(
 
     let styles = Styles::new(color_enabled);
     let interactive = mode == Mode::Live;
-    let _cursor_guard = CursorGuard::new(interactive);
 
     let gutter = tasks.iter().map(|t| t.name.len()).max().unwrap_or(10);
     let start_time = Instant::now();
@@ -272,6 +279,9 @@ pub fn execute_tasks(
     let mut dirty = false;
     // Live view: output waiting for the next frame, written above the status block.
     let mut pending: Vec<u8> = Vec::new();
+    // Live view: failed tasks' tails, replayed before the summary so they are
+    // not lost among other tasks' interleaved output.
+    let mut failures: Vec<(usize, Outcome, i32, Tail)> = Vec::new();
 
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout());
 
@@ -331,7 +341,7 @@ pub fn execute_tasks(
                     let spec = &tasks[index];
                     let _ = writeln!(
                         pending,
-                        "{}{}{}{} {}{}{}{}",
+                        "  {}{}{}{} {}{}{} {}",
                         styles.task_color(spec.color_idx),
                         styles.bold(),
                         spec.name.pad_right(gutter),
@@ -378,6 +388,9 @@ pub fn execute_tasks(
                     };
                     if interactive {
                         pending.extend_from_slice(block.as_bytes());
+                        if outcome.is_bad() && !tail.lines.is_empty() {
+                            failures.push((index, outcome, exit_code, tail));
+                        }
                     } else if !block.is_empty() {
                         let _ = out.write_all(block.as_bytes());
                         has_output = true;
@@ -461,7 +474,10 @@ pub fn execute_tasks(
     let has_failures = final_results.iter().any(|r| r.outcome.is_bad());
 
     match mode {
-        Mode::Live => print_verdict_summary(&final_results, total_elapsed, gutter, &styles),
+        Mode::Live => {
+            print_failure_tails(&tasks, &failures, &styles);
+            print_verdict_summary(&final_results, total_elapsed, gutter, &styles);
+        }
         Mode::Compact if !has_failures => {}
         Mode::Report | Mode::Compact => {
             let _ = out.write_all(report::summary(&final_results, total_elapsed).as_bytes());
@@ -784,7 +800,7 @@ fn paint_status_block(
         let phase_str = phase_text(st.phase, s);
 
         let line = format!(
-            "  {} {}{}{} {} {}{}{}",
+            "{} {}{}{} {} {}{}{}",
             icon,
             color,
             name_padded,
@@ -833,7 +849,7 @@ fn format_verdict(
     let detail = match outcome {
         Outcome::Passed => format!("{}passed{}", s.green(), s.reset()),
         Outcome::Failed(_) => {
-            format!("{}failed (exit code {}){}", s.red(), exit_code, s.reset())
+            format!("{}failed (exit {}){}", s.red(), exit_code, s.reset())
         }
         Outcome::Timeout => format!("{}timed out{}", s.yellow(), s.reset()),
         Outcome::Cancelled => format!("{}cancelled{}", s.gray(), s.reset()),
@@ -851,6 +867,39 @@ fn format_verdict(
         format_duration(duration),
         s.reset()
     )
+}
+
+fn print_failure_tails(tasks: &[TaskSpec], failures: &[(usize, Outcome, i32, Tail)], s: &Styles) {
+    for (index, outcome, exit_code, tail) in failures {
+        let what = match outcome {
+            Outcome::Timeout => "timed out".to_string(),
+            _ => format!("exit {exit_code}"),
+        };
+        println!();
+        println!(
+            "{}✖{} {}{}{}{} {}{what}{}",
+            s.red(),
+            s.reset(),
+            s.task_color(tasks[*index].color_idx),
+            s.bold(),
+            tasks[*index].name,
+            s.reset(),
+            s.gray(),
+            s.reset()
+        );
+        let bar = format!("{}│{}", s.gray(), s.reset());
+        if tail.omitted > 0 {
+            println!(
+                "  {bar} {}… {} earlier lines omitted{}",
+                s.gray(),
+                tail.omitted,
+                s.reset()
+            );
+        }
+        for line in &tail.lines {
+            println!("  {bar} {line}{}", s.reset());
+        }
+    }
 }
 
 fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usize, s: &Styles) {
@@ -880,7 +929,13 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
 
     let failed_names = format_failed_names(&failed);
 
-    for r in &ranked {
+    // Slowest first; past the cap only failures still get a row.
+    let mut hidden = 0;
+    for (i, r) in ranked.iter().enumerate() {
+        if i >= SUMMARY_ROWS && !r.outcome.is_bad() {
+            hidden += 1;
+            continue;
+        }
         let color = s.task_color(r.color_idx);
         let name_padded = r.name.pad_right(gutter);
 
@@ -920,13 +975,16 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
         );
     }
 
+    if hidden > 0 {
+        println!("  {}… {hidden} more{}", s.gray(), s.reset());
+    }
+
     println!();
     if failed.is_empty() && cancelled == 0 {
         println!(
-            "{}{} ✔ {}/{} passed{} {}in {}{}",
+            "{}{} ✔ {} passed{} {}in {}{}",
             s.green(),
             s.bold(),
-            results.len(),
             results.len(),
             s.reset(),
             s.gray(),
@@ -966,9 +1024,9 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
 
     // Turborepo-inspired concurrency efficiency report
     let total_cpu_duration: Duration = results.iter().map(|r| r.duration).sum();
-    if total_cpu_duration > elapsed && elapsed.as_millis() > 30 && results.len() > 1 {
+    let saved = total_cpu_duration.saturating_sub(elapsed);
+    if saved >= Duration::from_secs(1) && results.len() > 1 {
         let speedup = total_cpu_duration.as_secs_f64() / elapsed.as_secs_f64().max(0.001);
-        let saved = total_cpu_duration.saturating_sub(elapsed);
         println!(
             "{}⚡ Concurrency: {:.1}x speedup (saved {} across {} tasks){}",
             s.cyan(),
