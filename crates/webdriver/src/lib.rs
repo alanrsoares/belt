@@ -391,6 +391,10 @@ fn run_step(
             let _ = writeln!(out, "{}", session.page_text(selector.as_deref())?);
             Outcome::ok()
         }
+        Step::Dialog { accept, text } => {
+            session.set_dialog_policy(*accept, text.clone());
+            Outcome::with(if *accept { "dialogs: accept" } else { "dialogs: dismiss" })
+        }
         Step::A11y => {
             let found = session.a11y()?;
             if found.is_empty() {
@@ -479,7 +483,7 @@ fn run_step(
 
     // Shown even with --quiet: the page changed without the agent asking.
     for note in session.take_dialogs() {
-        let _ = writeln!(out, "{} dialog {note} (auto-accepted)", c.yellow("note"));
+        let _ = writeln!(out, "{} dialog {note}", c.yellow("note"));
     }
 
     Ok(Flow::Continue)
@@ -505,6 +509,7 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Url => "url",
         Step::Title => "title",
         Step::A11y => "a11y",
+        Step::Dialog { .. } => "dialog",
         Step::Find { .. } => "find",
         Step::Text { .. } => "text",
         Step::Console { .. } => "console",

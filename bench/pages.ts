@@ -84,10 +84,16 @@ const nav300 = (): string =>
 const dialog = (): string =>
   shell(
     "Dialog",
-    `<button id="alert" type="button">Show alert</button><p id="out"></p>`,
+    `<button id="alert" type="button">Show alert</button><button id="confirm" type="button">Ask</button><button id="prompt" type="button">Name</button><p id="out"></p><p id="res"></p>`,
     `document.getElementById("alert").addEventListener("click", () => {
   alert("hello");
   document.getElementById("out").textContent = "after-alert";
+});
+document.getElementById("confirm").addEventListener("click", () => {
+  document.getElementById("res").textContent = "confirm=" + confirm("sure?");
+});
+document.getElementById("prompt").addEventListener("click", () => {
+  document.getElementById("res").textContent = "prompt=" + prompt("name?", "dflt");
 });`,
   );
 

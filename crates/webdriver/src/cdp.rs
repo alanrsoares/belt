@@ -295,6 +295,9 @@ pub struct CdpSession {
     next_ref: usize,
     /// Dialogs auto-accepted since the last `take_dialogs`, for the agent to see.
     dialogs: Vec<String>,
+    /// Answer for later dialogs: accept (with optional prompt text) or dismiss.
+    dialog_accept: bool,
+    dialog_text: Option<String>,
 }
 
 impl CdpSession {
@@ -310,7 +313,14 @@ impl CdpSession {
             ref_of: HashMap::new(),
             next_ref: 1,
             dialogs: Vec::new(),
+            dialog_accept: true,
+            dialog_text: None,
         }
+    }
+
+    pub fn set_dialog_policy(&mut self, accept: bool, text: Option<String>) {
+        self.dialog_accept = accept;
+        self.dialog_text = text;
     }
 
     /// Dialogs auto-accepted since the last call, as `kind "message"` notes.
@@ -333,14 +343,13 @@ impl CdpSession {
         if message.chars().count() > 120 {
             shown.push('…');
         }
-        self.dialogs.push(format!("{kind} {shown:?}"));
+        let verdict = if self.dialog_accept { "accepted" } else { "dismissed" };
+        self.dialogs.push(format!("{kind} {shown:?} ({verdict})"));
 
         let mut reply = HashMap::new();
-        reply.insert("accept".to_string(), JsonValue::Bool(true));
-        reply.insert(
-            "promptText".to_string(),
-            JsonValue::String(text("defaultPrompt")),
-        );
+        reply.insert("accept".to_string(), JsonValue::Bool(self.dialog_accept));
+        let prompt = self.dialog_text.clone().unwrap_or_else(|| text("defaultPrompt"));
+        reply.insert("promptText".to_string(), JsonValue::String(prompt));
         let id = self.next_id;
         self.next_id += 1;
         let mut req = HashMap::new();

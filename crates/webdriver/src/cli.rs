@@ -232,6 +232,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} / {}                   Print current URL / page title
     {} <query>                  Interactive nodes whose name contains the text, or whose role matches; refs work with click
     {} [css]                    Visible text of main/body or a CSS match (cheaper than html)
+    {} accept [text]|dismiss    Answer later JS dialogs (default: accept); stays set
     {}                          Basic a11y findings (alt, labels, names, ids, lang); not a WCAG audit
     {} [--errors|--full|--clear]  Buffered console errors, repeats collapsed
     {} [--all]                 Accessibility tree as 'eN role \"name\"' lines
@@ -287,6 +288,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
         c.yellow("title"),
         c.yellow("find"),
         c.yellow("text"),
+        c.yellow("dialog"),
         c.yellow("a11y"),
         c.yellow("console"),
         c.yellow("snapshot"),

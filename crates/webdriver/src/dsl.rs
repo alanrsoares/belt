@@ -56,6 +56,10 @@ pub enum Step {
     Url,
     Title,
     A11y,
+    Dialog {
+        accept: bool,
+        text: Option<String>,
+    },
     Find {
         query: String,
     },
@@ -462,6 +466,22 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 steps.push(Step::A11y);
             }
+            "dialog" => {
+                idx += 1;
+                let accept = match tokens.get(idx).map(String::as_str) {
+                    Some("accept") => true,
+                    Some("dismiss") => false,
+                    _ => return Err("dialog requires accept or dismiss".into()),
+                };
+                idx += 1;
+                let text = if accept && idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
+                    idx += 1;
+                    Some(tokens[idx - 1].clone())
+                } else {
+                    None
+                };
+                steps.push(Step::Dialog { accept, text });
+            }
             "find" => {
                 idx += 1;
                 let query = tokens
@@ -599,6 +619,7 @@ fn is_verb(s: &str) -> bool {
             | "url"
             | "title"
             | "a11y"
+            | "dialog"
             | "text"
             | "find"
             | "console"
@@ -881,6 +902,16 @@ mod tests {
         )
         .is_err());
         assert!(parse_tokens(&["screenshot".to_string(), "-s".to_string()], 30_000).is_err());
+    }
+
+    #[test]
+    fn dialog_takes_accept_or_dismiss() {
+        let steps = parse_script("dialog dismiss\ndialog accept hello\ndialog accept\nurl", 1000).unwrap();
+        assert_eq!(steps[0], Step::Dialog { accept: false, text: None });
+        assert_eq!(steps[1], Step::Dialog { accept: true, text: Some("hello".into()) });
+        assert_eq!(steps[2], Step::Dialog { accept: true, text: None });
+        assert!(parse_script("dialog", 1000).is_err());
+        assert!(parse_script("dialog maybe", 1000).is_err());
     }
 
     #[test]
