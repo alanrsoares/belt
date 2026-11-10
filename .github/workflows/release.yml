@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 env:
-  TOOLS: "scaffold portkill jwt devclean fanout webdriver grabsite"
+  TOOLS: "scaffold portkill jwt devclean fanout webdriver grabsite belt"
 
 jobs:
   build:

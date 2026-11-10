@@ -20,6 +20,7 @@ members = [
     "crates/fanout",
     "crates/webdriver",
     "crates/grabsite",
+    "crates/belt",
 ]
 default-members = [
     "crates/local-common",
@@ -30,6 +31,7 @@ default-members = [
     "crates/fanout",
     "crates/webdriver",
     "crates/grabsite",
+    "crates/belt",
 ]
 
 # Inherited by every crate via `version.workspace = true`, etc.
