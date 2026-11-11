@@ -284,7 +284,11 @@ impl Repl {
     /// Send one command line and collect its output up to the end marker.
     /// `Err` means the child is dead or stuck and must be dropped.
     fn send(&mut self, args: &[String]) -> Result<(String, bool), String> {
-        let line = args.iter().map(|a| quote_token(a)).collect::<Vec<_>>().join(" ");
+        let line = args
+            .iter()
+            .map(|a| quote_token(a))
+            .collect::<Vec<_>>()
+            .join(" ");
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
             .map_err(|err| format!("webdriver child is gone: {err}"))?;

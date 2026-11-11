@@ -379,9 +379,16 @@ fn run_step(
                 let _ = writeln!(out, "{} {} \"{}\"", node.reference, node.role, node.name);
             }
             if hits.len() > FIND_LIMIT {
-                Outcome::warn(format!("{} matches, first {FIND_LIMIT} shown; narrow the query", hits.len()))
+                Outcome::warn(format!(
+                    "{} matches, first {FIND_LIMIT} shown; narrow the query",
+                    hits.len()
+                ))
             } else {
-                Outcome::with(format!("{} match{}", hits.len(), if hits.len() == 1 { "" } else { "es" }))
+                Outcome::with(format!(
+                    "{} match{}",
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "es" }
+                ))
             }
         }
         Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
@@ -393,7 +400,11 @@ fn run_step(
         }
         Step::Dialog { accept, text } => {
             session.set_dialog_policy(*accept, text.clone());
-            Outcome::with(if *accept { "dialogs: accept" } else { "dialogs: dismiss" })
+            Outcome::with(if *accept {
+                "dialogs: accept"
+            } else {
+                "dialogs: dismiss"
+            })
         }
         Step::A11y => {
             let found = session.a11y()?;

@@ -474,7 +474,11 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     _ => return Err("dialog requires accept or dismiss".into()),
                 };
                 idx += 1;
-                let text = if accept && idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
+                let text = if accept
+                    && idx < tokens.len()
+                    && !is_verb(&tokens[idx])
+                    && !is_url(&tokens[idx])
+                {
                     idx += 1;
                     Some(tokens[idx - 1].clone())
                 } else {
@@ -494,12 +498,13 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             }
             "text" => {
                 idx += 1;
-                let selector = if idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
-                    idx += 1;
-                    Some(tokens[idx - 1].clone())
-                } else {
-                    None
-                };
+                let selector =
+                    if idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
+                        idx += 1;
+                        Some(tokens[idx - 1].clone())
+                    } else {
+                        None
+                    };
                 steps.push(Step::Text { selector });
             }
             "console" => {
@@ -906,10 +911,32 @@ mod tests {
 
     #[test]
     fn dialog_takes_accept_or_dismiss() {
-        let steps = parse_script("dialog dismiss\ndialog accept hello\ndialog accept\nurl", 1000).unwrap();
-        assert_eq!(steps[0], Step::Dialog { accept: false, text: None });
-        assert_eq!(steps[1], Step::Dialog { accept: true, text: Some("hello".into()) });
-        assert_eq!(steps[2], Step::Dialog { accept: true, text: None });
+        let steps = parse_script(
+            "dialog dismiss\ndialog accept hello\ndialog accept\nurl",
+            1000,
+        )
+        .unwrap();
+        assert_eq!(
+            steps[0],
+            Step::Dialog {
+                accept: false,
+                text: None
+            }
+        );
+        assert_eq!(
+            steps[1],
+            Step::Dialog {
+                accept: true,
+                text: Some("hello".into())
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::Dialog {
+                accept: true,
+                text: None
+            }
+        );
         assert!(parse_script("dialog", 1000).is_err());
         assert!(parse_script("dialog maybe", 1000).is_err());
     }
@@ -924,13 +951,23 @@ mod tests {
     fn text_takes_an_optional_selector() {
         let steps = parse_script("text\ntext article\nurl", 1000).unwrap();
         assert_eq!(steps[0], Step::Text { selector: None });
-        assert_eq!(steps[1], Step::Text { selector: Some("article".into()) });
+        assert_eq!(
+            steps[1],
+            Step::Text {
+                selector: Some("article".into())
+            }
+        );
     }
 
     #[test]
     fn find_needs_a_query() {
         let steps = parse_script("find 'Link 250'", 1000).unwrap();
-        assert_eq!(steps, vec![Step::Find { query: "Link 250".into() }]);
+        assert_eq!(
+            steps,
+            vec![Step::Find {
+                query: "Link 250".into()
+            }]
+        );
         assert!(parse_script("find", 1000).is_err());
     }
 

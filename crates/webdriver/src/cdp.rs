@@ -260,7 +260,10 @@ fn ax_reading_order(nodes: &[JsonValue]) -> Vec<&JsonValue> {
             .is_none_or(|p| !index.contains_key(p))
     };
     // Reverse so popping from the stack yields roots and children in order.
-    let mut stack: Vec<usize> = (0..nodes.len()).rev().filter(|&i| is_root(&nodes[i])).collect();
+    let mut stack: Vec<usize> = (0..nodes.len())
+        .rev()
+        .filter(|&i| is_root(&nodes[i]))
+        .collect();
     let mut seen = vec![false; nodes.len()];
     let mut out = Vec::with_capacity(nodes.len());
     while let Some(i) = stack.pop() {
@@ -269,7 +272,11 @@ fn ax_reading_order(nodes: &[JsonValue]) -> Vec<&JsonValue> {
         }
         out.push(&nodes[i]);
         if let Some(kids) = nodes[i].get("childIds").and_then(|c| c.as_array()) {
-            stack.extend(kids.iter().rev().filter_map(|k| k.as_str().and_then(|k| index.get(k)).copied()));
+            stack.extend(
+                kids.iter()
+                    .rev()
+                    .filter_map(|k| k.as_str().and_then(|k| index.get(k)).copied()),
+            );
         }
     }
     // Nodes unreachable from any root (broken links) go last rather than vanish.
@@ -346,12 +353,19 @@ impl CdpSession {
         if message.chars().count() > 120 {
             shown.push('…');
         }
-        let verdict = if self.dialog_accept { "accepted" } else { "dismissed" };
+        let verdict = if self.dialog_accept {
+            "accepted"
+        } else {
+            "dismissed"
+        };
         self.dialogs.push(format!("{kind} {shown:?} ({verdict})"));
 
         let mut reply = HashMap::new();
         reply.insert("accept".to_string(), JsonValue::Bool(self.dialog_accept));
-        let prompt = self.dialog_text.clone().unwrap_or_else(|| text("defaultPrompt"));
+        let prompt = self
+            .dialog_text
+            .clone()
+            .unwrap_or_else(|| text("defaultPrompt"));
         reply.insert("promptText".to_string(), JsonValue::String(prompt));
         let id = self.next_id;
         self.next_id += 1;
@@ -410,12 +424,18 @@ impl CdpSession {
                 }
             }
             "Network.requestWillBeSent" => {
-                if let Some(id) = params.and_then(|p| p.get("requestId")).and_then(|i| i.as_str()) {
+                if let Some(id) = params
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|i| i.as_str())
+                {
                     self.inflight.insert(id.to_string(), Instant::now());
                 }
             }
             "Network.loadingFinished" | "Network.loadingFailed" => {
-                if let Some(id) = params.and_then(|p| p.get("requestId")).and_then(|i| i.as_str()) {
+                if let Some(id) = params
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|i| i.as_str())
+                {
                     self.inflight.remove(id);
                 }
             }
@@ -607,15 +627,22 @@ impl CdpSession {
     pub fn page_text(&mut self, selector: Option<&str>) -> Result<String, String> {
         // shortcut: CSS selectors only, no `text=`/`role=` locators; upgrade when agents need them.
         let pick = match selector {
-            Some(sel) => format!("document.querySelector({})", JsonValue::String(sel.to_string()).to_json_string()),
-            None => "(document.querySelector('main, article, [role=main]') || document.body)".to_string(),
+            Some(sel) => format!(
+                "document.querySelector({})",
+                JsonValue::String(sel.to_string()).to_json_string()
+            ),
+            None => "(document.querySelector('main, article, [role=main]') || document.body)"
+                .to_string(),
         };
         let js = format!(
             "(()=>{{const e={pick};if(!e)return null;const t=e.innerText.replace(/[ \\t]+\\n/g,'\\n').replace(/\\n{{3,}}/g,'\\n\\n').trim();return t.length>{TEXT_LIMIT}?t.slice(0,{TEXT_LIMIT})+'\\n[truncated '+(t.length-{TEXT_LIMIT})+' chars]':t}})()"
         );
         match self.evaluate(&js)?.as_str() {
             Some(t) => Ok(t.to_string()),
-            None => Err(format!("no element matches '{}'", selector.unwrap_or("body"))),
+            None => Err(format!(
+                "no element matches '{}'",
+                selector.unwrap_or("body")
+            )),
         }
     }
 
@@ -905,12 +932,18 @@ impl CdpSession {
                 ));
             }
             self.drain_events()?;
-            let busy = self.inflight.values().filter(|t| t.elapsed() < LONG_POLL).count();
+            let busy = self
+                .inflight
+                .values()
+                .filter(|t| t.elapsed() < LONG_POLL)
+                .count();
             if busy == 0 {
                 return Ok(());
             }
             if start.elapsed().as_millis() as u64 >= timeout_ms {
-                return Err(format!("{busy} requests still in flight after {timeout_ms}ms"));
+                return Err(format!(
+                    "{busy} requests still in flight after {timeout_ms}ms"
+                ));
             }
         }
     }
