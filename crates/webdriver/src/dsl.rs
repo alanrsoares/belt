@@ -55,6 +55,17 @@ pub enum Step {
     },
     Url,
     Title,
+    A11y,
+    Dialog {
+        accept: bool,
+        text: Option<String>,
+    },
+    Find {
+        query: String,
+    },
+    Text {
+        selector: Option<String>,
+    },
     Snapshot {
         all: bool,
     },
@@ -451,6 +462,51 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 steps.push(Step::Title);
             }
+            "a11y" => {
+                idx += 1;
+                steps.push(Step::A11y);
+            }
+            "dialog" => {
+                idx += 1;
+                let accept = match tokens.get(idx).map(String::as_str) {
+                    Some("accept") => true,
+                    Some("dismiss") => false,
+                    _ => return Err("dialog requires accept or dismiss".into()),
+                };
+                idx += 1;
+                let text = if accept
+                    && idx < tokens.len()
+                    && !is_verb(&tokens[idx])
+                    && !is_url(&tokens[idx])
+                {
+                    idx += 1;
+                    Some(tokens[idx - 1].clone())
+                } else {
+                    None
+                };
+                steps.push(Step::Dialog { accept, text });
+            }
+            "find" => {
+                idx += 1;
+                let query = tokens
+                    .get(idx)
+                    .filter(|t| !is_verb(t))
+                    .cloned()
+                    .ok_or("find requires a query (role or name text)")?;
+                idx += 1;
+                steps.push(Step::Find { query });
+            }
+            "text" => {
+                idx += 1;
+                let selector =
+                    if idx < tokens.len() && !is_verb(&tokens[idx]) && !is_url(&tokens[idx]) {
+                        idx += 1;
+                        Some(tokens[idx - 1].clone())
+                    } else {
+                        None
+                    };
+                steps.push(Step::Text { selector });
+            }
             "console" => {
                 idx += 1;
                 let mut mode = ConsoleMode::Errors;
@@ -567,6 +623,10 @@ fn is_verb(s: &str) -> bool {
             | "hover"
             | "url"
             | "title"
+            | "a11y"
+            | "dialog"
+            | "text"
+            | "find"
             | "console"
             | "snapshot"
             | "aria"
@@ -847,6 +907,68 @@ mod tests {
         )
         .is_err());
         assert!(parse_tokens(&["screenshot".to_string(), "-s".to_string()], 30_000).is_err());
+    }
+
+    #[test]
+    fn dialog_takes_accept_or_dismiss() {
+        let steps = parse_script(
+            "dialog dismiss\ndialog accept hello\ndialog accept\nurl",
+            1000,
+        )
+        .unwrap();
+        assert_eq!(
+            steps[0],
+            Step::Dialog {
+                accept: false,
+                text: None
+            }
+        );
+        assert_eq!(
+            steps[1],
+            Step::Dialog {
+                accept: true,
+                text: Some("hello".into())
+            }
+        );
+        assert_eq!(
+            steps[2],
+            Step::Dialog {
+                accept: true,
+                text: None
+            }
+        );
+        assert!(parse_script("dialog", 1000).is_err());
+        assert!(parse_script("dialog maybe", 1000).is_err());
+    }
+
+    #[test]
+    fn a11y_is_a_verb() {
+        let steps = parse_script("a11y\nurl", 1000).unwrap();
+        assert_eq!(steps, vec![Step::A11y, Step::Url]);
+    }
+
+    #[test]
+    fn text_takes_an_optional_selector() {
+        let steps = parse_script("text\ntext article\nurl", 1000).unwrap();
+        assert_eq!(steps[0], Step::Text { selector: None });
+        assert_eq!(
+            steps[1],
+            Step::Text {
+                selector: Some("article".into())
+            }
+        );
+    }
+
+    #[test]
+    fn find_needs_a_query() {
+        let steps = parse_script("find 'Link 250'", 1000).unwrap();
+        assert_eq!(
+            steps,
+            vec![Step::Find {
+                query: "Link 250".into()
+            }]
+        );
+        assert!(parse_script("find", 1000).is_err());
     }
 
     #[test]

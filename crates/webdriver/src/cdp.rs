@@ -243,6 +243,50 @@ pub struct SnapshotNode {
     pub backend_node_id: i64,
 }
 
+/// AX nodes in reading order: iterative pre-order DFS from each root, children
+/// in `childIds` order. Chrome returns a flat list in no useful order, so the
+/// node cap would otherwise hide arbitrary nodes. An ignored node still passes
+/// its children on, and a visited set guards against malformed cycles.
+fn ax_reading_order(nodes: &[JsonValue]) -> Vec<&JsonValue> {
+    let id_of = |n: &JsonValue| n.get("nodeId").and_then(|i| i.as_str()).map(str::to_string);
+    let index: HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| id_of(n).map(|id| (id, i)))
+        .collect();
+    let is_root = |n: &JsonValue| {
+        n.get("parentId")
+            .and_then(|p| p.as_str())
+            .is_none_or(|p| !index.contains_key(p))
+    };
+    // Reverse so popping from the stack yields roots and children in order.
+    let mut stack: Vec<usize> = (0..nodes.len())
+        .rev()
+        .filter(|&i| is_root(&nodes[i]))
+        .collect();
+    let mut seen = vec![false; nodes.len()];
+    let mut out = Vec::with_capacity(nodes.len());
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut seen[i], true) {
+            continue;
+        }
+        out.push(&nodes[i]);
+        if let Some(kids) = nodes[i].get("childIds").and_then(|c| c.as_array()) {
+            stack.extend(
+                kids.iter()
+                    .rev()
+                    .filter_map(|k| k.as_str().and_then(|k| index.get(k)).copied()),
+            );
+        }
+    }
+    // Nodes unreachable from any root (broken links) go last rather than vanish.
+    out.extend((0..nodes.len()).filter(|&i| !seen[i]).map(|i| &nodes[i]));
+    out
+}
+
+/// Longest page text `text` returns, in UTF-16 units.
+const TEXT_LIMIT: usize = 20_000;
+
 pub struct CdpSession {
     ws: WebSocketClient,
     next_id: u64,
@@ -253,6 +297,16 @@ pub struct CdpSession {
     target_frame: Option<String>,
     /// Last `snapshot` result, keyed by the `eN` reference handed to the agent.
     refs: HashMap<String, i64>,
+    /// DOM node -> its `eN`, so a node keeps its ref across snapshots of one document.
+    ref_of: HashMap<i64, String>,
+    next_ref: usize,
+    /// Dialogs auto-accepted since the last `take_dialogs`, for the agent to see.
+    dialogs: Vec<String>,
+    /// Answer for later dialogs: accept (with optional prompt text) or dismiss.
+    /// Requests started and not yet finished, by id.
+    inflight: HashMap<String, Instant>,
+    dialog_accept: bool,
+    dialog_text: Option<String>,
 }
 
 impl CdpSession {
@@ -265,7 +319,65 @@ impl CdpSession {
             contexts: Vec::new(),
             target_frame: None,
             refs: HashMap::new(),
+            ref_of: HashMap::new(),
+            next_ref: 1,
+            dialogs: Vec::new(),
+            inflight: HashMap::new(),
+            dialog_accept: true,
+            dialog_text: None,
         }
+    }
+
+    pub fn set_dialog_policy(&mut self, accept: bool, text: Option<String>) {
+        self.dialog_accept = accept;
+        self.dialog_text = text;
+    }
+
+    /// Dialogs auto-accepted since the last call, as `kind "message"` notes.
+    pub fn take_dialogs(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.dialogs)
+    }
+
+    /// An open JS dialog freezes the page, and every CDP command behind it
+    /// stalls. Accept it at once and keep a note; `prompt` takes its default.
+    fn accept_dialog(&mut self, params: Option<&JsonValue>) -> Result<(), String> {
+        let text = |key: &str| {
+            params
+                .and_then(|p| p.get(key))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let (kind, message) = (text("type"), text("message"));
+        let mut shown: String = message.chars().take(120).collect();
+        if message.chars().count() > 120 {
+            shown.push('…');
+        }
+        let verdict = if self.dialog_accept {
+            "accepted"
+        } else {
+            "dismissed"
+        };
+        self.dialogs.push(format!("{kind} {shown:?} ({verdict})"));
+
+        let mut reply = HashMap::new();
+        reply.insert("accept".to_string(), JsonValue::Bool(self.dialog_accept));
+        let prompt = self
+            .dialog_text
+            .clone()
+            .unwrap_or_else(|| text("defaultPrompt"));
+        reply.insert("promptText".to_string(), JsonValue::String(prompt));
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut req = HashMap::new();
+        req.insert("id".to_string(), JsonValue::Number(id as f64));
+        req.insert(
+            "method".to_string(),
+            JsonValue::String("Page.handleJavaScriptDialog".to_string()),
+        );
+        req.insert("params".to_string(), JsonValue::Object(reply));
+        // The reply carries an id nobody waits for; `call` skips unknown ids.
+        self.ws.send_text(&JsonValue::Object(req).to_json_string())
     }
 
     pub fn set_default_timeout(&mut self, timeout_ms: u64) {
@@ -311,6 +423,22 @@ impl CdpSession {
                     });
                 }
             }
+            "Network.requestWillBeSent" => {
+                if let Some(id) = params
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|i| i.as_str())
+                {
+                    self.inflight.insert(id.to_string(), Instant::now());
+                }
+            }
+            "Network.loadingFinished" | "Network.loadingFailed" => {
+                if let Some(id) = params
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|i| i.as_str())
+                {
+                    self.inflight.remove(id);
+                }
+            }
             "Runtime.executionContextDestroyed" => {
                 if let Some(id) = params
                     .and_then(|p| p.get("executionContextId"))
@@ -319,7 +447,13 @@ impl CdpSession {
                     self.contexts.retain(|c| c.id != id);
                 }
             }
-            "Runtime.executionContextsCleared" => self.contexts.clear(),
+            "Runtime.executionContextsCleared" => {
+                self.contexts.clear();
+                // New document: old DOM node ids are dead, so restart the refs.
+                self.refs.clear();
+                self.ref_of.clear();
+                self.next_ref = 1;
+            }
             _ => {}
         }
 
@@ -408,6 +542,9 @@ impl CdpSession {
             let msg = self.ws.read_text()?;
             let val = json::parse(&msg)?;
             self.record_event(&val);
+            if val.get("method").and_then(|m| m.as_str()) == Some("Page.javascriptDialogOpening") {
+                self.accept_dialog(val.get("params"))?;
+            }
 
             if let Some(id_val) = val.get("id") {
                 if id_val.as_i64() == Some(req_id as i64) {
@@ -431,6 +568,7 @@ impl CdpSession {
         self.call("Page.enable", JsonValue::Object(HashMap::new()))?;
         self.call("Runtime.enable", JsonValue::Object(HashMap::new()))?;
         self.call("DOM.enable", JsonValue::Object(HashMap::new()))?;
+        self.call("Network.enable", JsonValue::Object(HashMap::new()))?;
         // Log domain surfaces network/security failures the page never logs itself.
         let _ = self.call("Log.enable", JsonValue::Object(HashMap::new()));
         let _ = self.call("Accessibility.enable", JsonValue::Object(HashMap::new()));
@@ -476,6 +614,36 @@ impl CdpSession {
             JsonValue::Object(params),
         )?;
         Ok(())
+    }
+
+    /// Basic accessibility findings, one `rule selector` per line; empty when clean.
+    pub fn a11y(&mut self) -> Result<String, String> {
+        let v = self.evaluate(include_str!("a11y.js"))?;
+        Ok(v.as_str().unwrap_or_default().to_string())
+    }
+
+    /// Visible text of `selector`, else of `main`/`article`/body, blank runs
+    /// collapsed and capped. Far cheaper than `get_html` for reading a page.
+    pub fn page_text(&mut self, selector: Option<&str>) -> Result<String, String> {
+        // shortcut: CSS selectors only, no `text=`/`role=` locators; upgrade when agents need them.
+        let pick = match selector {
+            Some(sel) => format!(
+                "document.querySelector({})",
+                JsonValue::String(sel.to_string()).to_json_string()
+            ),
+            None => "(document.querySelector('main, article, [role=main]') || document.body)"
+                .to_string(),
+        };
+        let js = format!(
+            "(()=>{{const e={pick};if(!e)return null;const t=e.innerText.replace(/[ \\t]+\\n/g,'\\n').replace(/\\n{{3,}}/g,'\\n\\n').trim();return t.length>{TEXT_LIMIT}?t.slice(0,{TEXT_LIMIT})+'\\n[truncated '+(t.length-{TEXT_LIMIT})+' chars]':t}})()"
+        );
+        match self.evaluate(&js)?.as_str() {
+            Some(t) => Ok(t.to_string()),
+            None => Err(format!(
+                "no element matches '{}'",
+                selector.unwrap_or("body")
+            )),
+        }
     }
 
     pub fn evaluate(&mut self, expression: &str) -> Result<JsonValue, String> {
@@ -731,13 +899,19 @@ impl CdpSession {
         ))
     }
 
-    /// Wait until the DOM stops mutating for `quiet_ms`. Generic "SPA settled"
-    /// signal, preferable to guessing with a fixed sleep.
+    /// Wait until the DOM stops mutating for `quiet_ms` and no request is in
+    /// flight. Generic "SPA settled" signal, preferable to a fixed sleep.
     pub fn wait_for_quiet(&mut self, quiet_ms: u64, timeout_ms: u64) -> Result<(), String> {
-        let script = format!(
-            r#"new Promise((resolve) => {{
+        // shortcut: a request open over 3 s counts as a long poll and is ignored, raise if
+        // slow APIs settle too early.
+        const LONG_POLL: Duration = Duration::from_secs(3);
+        let start = Instant::now();
+        loop {
+            let left = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
+            let script = format!(
+                r#"new Promise((resolve) => {{
                 let last = Date.now();
-                const deadline = Date.now() + {timeout_ms};
+                const deadline = Date.now() + {left};
                 const obs = new MutationObserver(() => {{ last = Date.now(); }});
                 obs.observe(document.documentElement, {{
                     subtree: true, childList: true, attributes: true, characterData: true
@@ -751,13 +925,26 @@ impl CdpSession {
                     }}
                 }}, 50);
             }})"#
-        );
-
-        match self.evaluate(&script)? {
-            JsonValue::Bool(true) => Ok(()),
-            _ => Err(format!(
-                "DOM never stayed quiet for {quiet_ms}ms within {timeout_ms}ms"
-            )),
+            );
+            if self.evaluate(&script)? != JsonValue::Bool(true) {
+                return Err(format!(
+                    "DOM never stayed quiet for {quiet_ms}ms within {timeout_ms}ms"
+                ));
+            }
+            self.drain_events()?;
+            let busy = self
+                .inflight
+                .values()
+                .filter(|t| t.elapsed() < LONG_POLL)
+                .count();
+            if busy == 0 {
+                return Ok(());
+            }
+            if start.elapsed().as_millis() as u64 >= timeout_ms {
+                return Err(format!(
+                    "{busy} requests still in flight after {timeout_ms}ms"
+                ));
+            }
         }
     }
 
@@ -993,10 +1180,9 @@ impl CdpSession {
             .map(<[JsonValue]>::to_vec)
             .unwrap_or_default();
 
-        self.refs.clear();
         let mut out = Vec::new();
 
-        for node in nodes {
+        for node in ax_reading_order(&nodes) {
             if node.get("ignored").and_then(|i| i.as_bool()) == Some(true) {
                 continue;
             }
@@ -1024,7 +1210,15 @@ impl CdpSession {
                 continue;
             }
 
-            let reference = format!("e{}", out.len() + 1);
+            let next = &mut self.next_ref;
+            let reference = self
+                .ref_of
+                .entry(backend_node_id)
+                .or_insert_with(|| {
+                    *next += 1;
+                    format!("e{}", *next - 1)
+                })
+                .clone();
             self.refs.insert(reference.clone(), backend_node_id);
             out.push(SnapshotNode {
                 reference,
@@ -1239,6 +1433,26 @@ fn truncate_middle(s: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ax_reading_order_is_preorder_and_survives_bad_links() {
+        let raw = r#"[
+            {"nodeId":"b","parentId":"r","childIds":["d"]},
+            {"nodeId":"r","childIds":["c","b"]},
+            {"nodeId":"d","parentId":"b","childIds":["r"]},
+            {"nodeId":"c","parentId":"r","childIds":["missing"]},
+            {"nodeId":"orphan","parentId":"gone"}
+        ]"#;
+        let nodes = json::parse(raw).unwrap();
+        let nodes = nodes.as_array().unwrap();
+        let ids: Vec<&str> = ax_reading_order(nodes)
+            .iter()
+            .map(|n| n.get("nodeId").unwrap().as_str().unwrap())
+            .collect();
+        // Roots in list order: r, then orphan (its parent is not in the list).
+        // Under r: c before b (childIds order), then d; the d->r cycle is cut.
+        assert_eq!(ids, vec!["r", "c", "b", "d", "orphan"]);
+    }
+
     use super::*;
     use std::net::TcpListener;
     use std::thread;

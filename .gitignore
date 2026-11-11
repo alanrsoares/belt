@@ -17,3 +17,4 @@ release/
 # --- Local tool state (per-machine, not shared) ---------------------------
 .claude/
 .serena/
+.scratch/

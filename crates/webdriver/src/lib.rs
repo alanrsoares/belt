@@ -25,6 +25,8 @@ const NEAR_BLANK_PNG_BYTES: usize = 5_000;
 
 /// Cap on `snapshot` output, so a huge page cannot flood the transcript.
 const SNAPSHOT_NODE_LIMIT: usize = 200;
+/// Most matches `find` prints.
+const FIND_LIMIT: usize = 20;
 
 /// Longest console line kept in `--errors` mode.
 const CONSOLE_LINE_LIMIT: usize = 200;
@@ -183,6 +185,9 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
                 Err(e) => {
                     failures += 1;
                     let _ = writeln!(out, "{} {e}", c.red("err"));
+                    if let Some(m) = &opts.end_marker {
+                        let _ = writeln!(out, "{m}");
+                    }
                     let _ = out.flush();
                     if !opts.keep_going {
                         break;
@@ -209,6 +214,9 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
                         }
                     }
                 }
+            }
+            if let Some(m) = &opts.end_marker {
+                let _ = writeln!(out, "{m}");
             }
             let _ = out.flush();
             if stop {
@@ -357,9 +365,55 @@ fn run_step(
                 if nodes.len() == 1 { "" } else { "s" }
             ))
         }
+        Step::Find { query } => {
+            // The whole tree is numbered, so a match keeps a ref `click` accepts.
+            let all = session.snapshot(false, usize::MAX)?;
+            let needle = query.to_lowercase();
+            let hits: Vec<_> = all
+                .iter()
+                .filter(|n| {
+                    n.name.to_lowercase().contains(&needle) || n.role.to_lowercase() == needle
+                })
+                .collect();
+            for node in hits.iter().take(FIND_LIMIT) {
+                let _ = writeln!(out, "{} {} \"{}\"", node.reference, node.role, node.name);
+            }
+            if hits.len() > FIND_LIMIT {
+                Outcome::warn(format!(
+                    "{} matches, first {FIND_LIMIT} shown; narrow the query",
+                    hits.len()
+                ))
+            } else {
+                Outcome::with(format!(
+                    "{} match{}",
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "es" }
+                ))
+            }
+        }
         Step::Frame { target } => Outcome::with(session.target_frame(target.as_deref())?),
         Step::Url => Outcome::with(session.current_url()?),
         Step::Title => Outcome::with(session.title()?),
+        Step::Text { selector } => {
+            let _ = writeln!(out, "{}", session.page_text(selector.as_deref())?);
+            Outcome::ok()
+        }
+        Step::Dialog { accept, text } => {
+            session.set_dialog_policy(*accept, text.clone());
+            Outcome::with(if *accept {
+                "dialogs: accept"
+            } else {
+                "dialogs: dismiss"
+            })
+        }
+        Step::A11y => {
+            let found = session.a11y()?;
+            if found.is_empty() {
+                Outcome::with("no issues in basic checks (not a WCAG audit)")
+            } else {
+                Outcome::warn(format!("{} issues\n{found}", found.lines().count()))
+            }
+        }
         Step::Console { mode } => {
             session.drain_events()?;
             let rendered = render_console(session.console_entries(), *mode);
@@ -438,6 +492,11 @@ fn run_step(
         }
     }
 
+    // Shown even with --quiet: the page changed without the agent asking.
+    for note in session.take_dialogs() {
+        let _ = writeln!(out, "{} dialog {note}", c.yellow("note"));
+    }
+
     Ok(Flow::Continue)
 }
 
@@ -460,6 +519,10 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Frame { .. } => "frame",
         Step::Url => "url",
         Step::Title => "title",
+        Step::A11y => "a11y",
+        Step::Dialog { .. } => "dialog",
+        Step::Find { .. } => "find",
+        Step::Text { .. } => "text",
         Step::Console { .. } => "console",
         Step::Screenshot { .. } => "screenshot",
         Step::Pdf { .. } => "pdf",
@@ -647,6 +710,7 @@ mod tests {
             steps: steps.clone(),
             keep_going: true,
             stream_stdin: false,
+            end_marker: None,
         };
 
         let mut step_num = 0;
