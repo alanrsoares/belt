@@ -62,6 +62,87 @@ pub const TOOLS: &[Tool] = &[
     },
 ];
 
+/// A typed browser tool. It maps named string parameters onto one `webdriver`
+/// step, so an agent fills a small schema instead of building argv.
+pub struct BrowserTool {
+    pub name: &'static str,
+    pub summary: &'static str,
+    /// `(name, required)`.
+    pub params: &'static [(&'static str, bool)],
+    /// Argv template: `$p` takes parameter `p`; `?$p` is dropped when `p` is absent.
+    pub argv: &'static [&'static str],
+}
+
+pub const BROWSER_TOOLS: &[BrowserTool] = &[
+    BrowserTool { name: "browser_open", summary: "Open a URL in the kept browser.", params: &[("url", true)], argv: &["$url"] },
+    BrowserTool { name: "browser_snapshot", summary: "List interactive elements as `eN role \"name\"` (first 200).", params: &[], argv: &["snapshot"] },
+    BrowserTool { name: "browser_find", summary: "Find elements by name text or role in the whole page; use the returned ref.", params: &[("query", true)], argv: &["find", "$query"] },
+    BrowserTool { name: "browser_text", summary: "Read visible page text, or text matching a CSS selector.", params: &[("selector", false)], argv: &["text", "?$selector"] },
+    BrowserTool { name: "browser_click", summary: "Click an element by ref (from snapshot or find).", params: &[("ref", true)], argv: &["click", "ref=$ref"] },
+    BrowserTool { name: "browser_fill", summary: "Clear an element by ref, then type text.", params: &[("ref", true), ("text", true)], argv: &["fill", "ref=$ref", "$text"] },
+    BrowserTool { name: "browser_press", summary: "Press a key chord, e.g. Enter or Meta+O.", params: &[("key", true)], argv: &["press", "$key"] },
+    BrowserTool { name: "browser_settle", summary: "Wait until the DOM is quiet and no request is in flight.", params: &[], argv: &["settle"] },
+    BrowserTool { name: "browser_dialog", summary: "Set the answer for later JS dialogs: action is accept or dismiss; text answers a prompt.", params: &[("action", true), ("text", false)], argv: &["dialog", "$action", "?$text"] },
+    BrowserTool { name: "browser_url", summary: "Print the current URL.", params: &[], argv: &["url"] },
+];
+
+/// Build the `webdriver` argv for a browser tool, or say which parameter is missing.
+fn browser_argv(tool: &BrowserTool, args: Option<&JsonValue>) -> Result<Vec<String>, String> {
+    let get = |name: &str| {
+        args.and_then(|a| a.get(name))
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+    };
+    for (name, required) in tool.params {
+        if *required && get(name).is_none() {
+            return Err(format!("{}: missing string parameter `{name}`", tool.name));
+        }
+    }
+    let mut out = Vec::new();
+    for part in tool.argv {
+        let (optional, part) = part.strip_prefix('?').map_or((false, *part), |p| (true, p));
+        match part.split_once('$') {
+            Some((pre, name)) => match get(name) {
+                Some(v) => out.push(format!("{pre}{v}")),
+                None if optional => {}
+                None => return Err(format!("{}: missing `{name}`", tool.name)),
+            },
+            None => out.push(part.to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn browser_tool_json(tool: &BrowserTool) -> JsonValue {
+    let props = tool
+        .params
+        .iter()
+        .map(|(n, _)| (*n, obj(vec![("type", s("string"))])))
+        .collect();
+    let required = tool
+        .params
+        .iter()
+        .filter(|(_, r)| *r)
+        .map(|(n, _)| s(n))
+        .collect();
+    obj(vec![
+        ("name", s(tool.name)),
+        ("description", s(tool.summary)),
+        (
+            "inputSchema",
+            obj(vec![
+                ("type", s("object")),
+                ("properties", obj(props)),
+                ("required", JsonValue::Array(required)),
+            ]),
+        ),
+        (
+            "annotations",
+            obj(vec![("readOnlyHint", JsonValue::Bool(false))]),
+        ),
+    ])
+}
+
 pub fn find_tool(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|t| t.name == name)
 }
@@ -378,6 +459,17 @@ fn call(
         .and_then(|p| p.get("name"))
         .and_then(JsonValue::as_str)
         .ok_or("missing tool name")?;
+    if let Some(bt) = BROWSER_TOOLS.iter().find(|t| t.name == name) {
+        let argv = browser_argv(bt, params.and_then(|p| p.get("arguments")))?;
+        let (text, failed) = run_webdriver(&resolve("webdriver"), &argv);
+        return Ok(obj(vec![
+            (
+                "content",
+                JsonValue::Array(vec![obj(vec![("type", s("text")), ("text", s(&text))])]),
+            ),
+            ("isError", JsonValue::Bool(failed)),
+        ]));
+    }
     let tool = find_tool(name).ok_or_else(|| format!("unknown tool: {name}"))?;
     let args = match params
         .and_then(|p| p.get("arguments"))
@@ -464,7 +556,13 @@ pub fn handle(line: &str, resolve: &dyn Fn(&str) -> PathBuf) -> Option<String> {
         Some("ping") => obj(vec![]),
         Some("tools/list") => obj(vec![(
             "tools",
-            JsonValue::Array(TOOLS.iter().map(tool_json).collect()),
+            JsonValue::Array(
+                TOOLS
+                    .iter()
+                    .map(tool_json)
+                    .chain(BROWSER_TOOLS.iter().map(browser_tool_json))
+                    .collect(),
+            ),
         )]),
         Some("tools/call") => match call(params, resolve) {
             Ok(result) => result,
@@ -533,6 +631,27 @@ mod tests {
     }
 
     #[test]
+    fn browser_tools_map_params_to_argv() {
+        let find = |n: &str| BROWSER_TOOLS.iter().find(|t| t.name == n).unwrap();
+        let args = |j: &str| parse(j).unwrap();
+        let a = args(r#"{"ref":"e5","text":"hi"}"#);
+        assert_eq!(
+            browser_argv(find("browser_fill"), Some(&a)).unwrap(),
+            ["fill", "ref=e5", "hi"]
+        );
+        let none = args("{}");
+        assert_eq!(
+            browser_argv(find("browser_text"), Some(&none)).unwrap(),
+            ["text"]
+        );
+        assert!(browser_argv(find("browser_click"), Some(&none)).is_err());
+        assert_eq!(
+            browser_argv(find("browser_open"), Some(&args(r#"{"url":"http://x"}"#))).unwrap(),
+            ["http://x"]
+        );
+    }
+
+    #[test]
     fn tools_list_has_every_tool() {
         let r = reply(r#"{"jsonrpc":"2.0","id":"a","method":"tools/list"}"#);
         assert_eq!(r.get("id").unwrap().as_str(), Some("a"));
@@ -543,7 +662,7 @@ mod tests {
             .unwrap()
             .as_array()
             .unwrap();
-        assert_eq!(tools.len(), TOOLS.len());
+        assert_eq!(tools.len(), TOOLS.len() + BROWSER_TOOLS.len());
         let devclean = tools
             .iter()
             .find(|t| t.get("name").unwrap().as_str() == Some("devclean"))
