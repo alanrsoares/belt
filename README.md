@@ -44,6 +44,17 @@ just install-all   # from a clone
 
 Not published to crates.io — most of the tool names are already taken there.
 
+### Agent skills
+
+`skills/` holds agent skills for the tools. Install one with:
+
+```sh
+npx skills add alanrsoares/belt -s webdriver
+```
+
+`crates/webdriver/tests/skill.rs` fails if the skill's verbs or flags drift
+from `webdriver --help`.
+
 
 ## Layout
 
