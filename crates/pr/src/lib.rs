@@ -80,9 +80,17 @@ fn run_view(p: &Parsed, c: &local_common::Colour, out: &mut impl Write) -> i32 {
         }
     }
 
+    if p.hud {
+        match gh::fetch_review_threads(&pr.url) {
+            Ok(counts) => pr.review_threads = Some(counts),
+            Err(e) => eprintln!("{} failed to fetch review threads: {e}", c.yellow("warning:")),
+        }
+    }
+
     let opts = RenderOpts {
         width: terminal_columns(),
         compact: p.compact,
+        hud: p.hud,
         all_files: p.all_files,
         full_body: p.full_body,
         all_checks: p.all_checks,

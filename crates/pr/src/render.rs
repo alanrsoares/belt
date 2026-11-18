@@ -13,6 +13,7 @@ use crate::model::{
 pub struct RenderOpts {
     pub width: usize,
     pub compact: bool,
+    pub hud: bool,
     pub all_files: bool,
     pub full_body: bool,
     pub all_checks: bool,
@@ -32,6 +33,9 @@ pub fn render_pr(
 ) -> std::io::Result<()> {
     let width = opts.width.clamp(52, 104);
     let g = &opts.glyphs;
+    if opts.hud {
+        return render_hud(pr, c, g, width, out);
+    }
     render_header(pr, c, g, width, opts.now_secs, out)?;
     render_status_strip(pr, c, g, out)?;
     render_reviews(pr, c, g, width, out)?;
@@ -116,6 +120,301 @@ fn render_header(
 
     writeln!(out, "{}", c.gray(format!("╰{top_rule}╯")))?;
     Ok(())
+}
+
+fn render_hud(
+    pr: &PullRequest,
+    c: &Colour,
+    g: &Glyphs,
+    width: usize,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    let inner = width.saturating_sub(4);
+    let top_rule = "─".repeat(width.saturating_sub(2));
+    writeln!(out, "{}", c.gray(format!("╭{top_rule}╮")))?;
+
+    let (icon, headline, subtitle) = overview_status(pr, c, g);
+    let head_line = format!("{icon}  {}", c.bold(headline));
+    for line in wrap_plain_or_styled(&head_line, inner) {
+        write_box_line(&line, inner, c, out)?;
+    }
+    let sub_prefix = "   ";
+    for line in wrap_text(subtitle, inner.saturating_sub(sub_prefix.len())) {
+        write_box_line(&format!("{sub_prefix}{}", c.dim(line)), inner, c, out)?;
+    }
+
+    // Divide inner width across 3 columns separated by ` │ `.
+    // Total box width = 1 (│) + 1 + c1 + 3 ( │ ) + c2 + 3 ( │ ) + c3 + 1 + 1 (│) = c1 + c2 + c3 + 10.
+    let cols_total = width.saturating_sub(10);
+    let c1 = cols_total / 3;
+    let c2 = cols_total / 3;
+    let c3 = cols_total - c1 - c2;
+
+    let divider = format!(
+        "├{}┬{}┬{}┤",
+        "─".repeat(c1 + 2),
+        "─".repeat(c2 + 2),
+        "─".repeat(c3 + 2),
+    );
+    writeln!(out, "{}", c.gray(divider))?;
+
+    // Col 1: Checks
+    let (checks_label, checks_bar) = overview_checks_col(pr, c, c1);
+    // Col 2: Comments
+    let (comments_label, comments_bar) = overview_comments_col(pr, c, c2);
+    // Col 3: Approvals
+    let (approvals_label, approvals_bar) = overview_approvals_col(pr, c, c3);
+
+    write_overview_row(&[(&checks_label, c1), (&comments_label, c2), (&approvals_label, c3)], c, out)?;
+    write_overview_row(&[(&checks_bar, c1), (&comments_bar, c2), (&approvals_bar, c3)], c, out)?;
+
+    let bottom = format!(
+        "╰{}┴{}┴{}╯",
+        "─".repeat(c1 + 2),
+        "─".repeat(c2 + 2),
+        "─".repeat(c3 + 2),
+    );
+    writeln!(out, "{}", c.gray(bottom))?;
+    Ok(())
+}
+
+fn write_overview_row(
+    cols: &[(&str, usize)],
+    c: &Colour,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
+    let sep = c.gray("│");
+    write!(out, "{sep}")?;
+    for (idx, (content, w)) in cols.iter().enumerate() {
+        let vis = visible_width(content);
+        let pad = w.saturating_sub(vis);
+        write!(out, " {content}{} ", " ".repeat(pad))?;
+        if idx + 1 < cols.len() {
+            write!(out, "{sep}")?;
+        }
+    }
+    writeln!(out, "{sep}")
+}
+
+fn overview_status(pr: &PullRequest, c: &Colour, g: &Glyphs) -> (String, &'static str, &'static str) {
+    let (fail, pending, _) = count_check_buckets(&pr.checks);
+    match pr.state {
+        PrState::Merged => (
+            c.cyan(g.pr_merged()),
+            "Merged",
+            "Pull request has been merged",
+        ),
+        PrState::Closed => (
+            c.red(g.pr_closed()),
+            "Closed",
+            "Pull request is closed without merging",
+        ),
+        PrState::Draft => (
+            c.gray(g.pr_draft()),
+            "Draft pull request",
+            "Mark as ready for review before merging",
+        ),
+        PrState::Open => {
+            if pr.mergeable == Mergeable::Conflicting || pr.merge_state == MergeState::Dirty {
+                (
+                    c.red(g.err()),
+                    "Merge conflicts",
+                    "Resolve conflicts before merging",
+                )
+            } else if pr.merge_state == MergeState::Blocked {
+                match pr.review_decision {
+                    ReviewDecision::ChangesRequested => (
+                        c.red(g.err()),
+                        "Changes requested",
+                        "Address requested changes before merging",
+                    ),
+                    ReviewDecision::ReviewRequired => (
+                        c.yellow(g.pending()),
+                        "Review required",
+                        "At least 1 approving review is required",
+                    ),
+                    _ if fail > 0 => (
+                        c.red(g.err()),
+                        "Merging is blocked",
+                        "Required checks are failing",
+                    ),
+                    _ => (
+                        c.yellow(g.pending()),
+                        "Merging is blocked",
+                        "Waiting on required status checks",
+                    ),
+                }
+            } else if pr.merge_state == MergeState::Behind {
+                (
+                    c.yellow(g.pending()),
+                    "Branch is out of date",
+                    "Update branch with base before merging",
+                )
+            } else if pr.merge_state == MergeState::Unstable || fail > 0 || pending > 0 {
+                (
+                    c.green(g.ok()),
+                    "Able to merge",
+                    "Some non-required checks are failing or still in progress",
+                )
+            } else {
+                (
+                    c.green(g.ok()),
+                    "Able to merge",
+                    "All checks and requirements satisfied",
+                )
+            }
+        }
+    }
+}
+
+fn count_check_buckets(checks: &[Check]) -> (usize, usize, usize) {
+    let mut fail = 0usize;
+    let mut pending = 0usize;
+    let mut pass = 0usize;
+    for chk in checks {
+        match chk.bucket {
+            CheckBucket::Fail | CheckBucket::Cancel => fail += 1,
+            CheckBucket::Pending => pending += 1,
+            CheckBucket::Pass | CheckBucket::Skip => pass += 1,
+        }
+    }
+    (fail, pending, pass)
+}
+
+fn format_col_header(title: &str, detail: &str, col_w: usize, c: &Colour) -> String {
+    if detail.is_empty() {
+        return c.bold(truncate_ellipsis(title, col_w));
+    }
+    let prefix = format!("{title} ");
+    let avail = col_w.saturating_sub(prefix.chars().count());
+    if avail == 0 {
+        return c.bold(truncate_ellipsis(title, col_w));
+    }
+    let clipped = truncate_ellipsis(detail, avail);
+    format!("{} {}", c.bold(title), c.dim(clipped))
+}
+
+fn scale_segment(part: usize, total: usize, width: usize) -> usize {
+    (part * width + total / 2)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(width)
+}
+
+fn overview_checks_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
+    let (fail, pending, pass) = count_check_buckets(&pr.checks);
+    let total = fail + pending + pass;
+    let mut parts = Vec::new();
+    if fail > 0 {
+        parts.push(format!("{fail} failing"));
+    }
+    if pending > 0 {
+        parts.push(format!("{pending} pending"));
+    }
+    if parts.is_empty() && pass > 0 {
+        parts.push(format!("{pass} passed"));
+    }
+    let detail = if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    };
+    let header = format_col_header("Checks", &detail, col_w, c);
+    let bar = if total == 0 {
+        c.gray("░".repeat(col_w))
+    } else {
+        let fail_w = scale_segment(fail, total, col_w);
+        let pend_w = scale_segment(pending, total, col_w).min(col_w - fail_w);
+        let pass_w = col_w - fail_w - pend_w;
+        format!(
+            "{}{}{}",
+            c.red("━".repeat(fail_w)),
+            c.yellow("━".repeat(pend_w)),
+            c.green("━".repeat(pass_w)),
+        )
+    };
+    (header, bar)
+}
+
+fn overview_comments_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
+    match pr.review_threads {
+        Some(t) => {
+            let detail = if t.total == 0 {
+                "none".to_string()
+            } else if t.unresolved > 0 {
+                format!("{} unresolved", t.unresolved)
+            } else {
+                "all resolved".to_string()
+            };
+            let header = format_col_header("Comments", &detail, col_w, c);
+            let bar = if t.total == 0 {
+                c.gray("░".repeat(col_w))
+            } else {
+                let res_w = scale_segment(t.resolved, t.total, col_w);
+                let unres_w = col_w - res_w;
+                format!(
+                    "{}{}",
+                    c.cyan("━".repeat(res_w)),
+                    c.gray("━".repeat(unres_w)),
+                )
+            };
+            (header, bar)
+        }
+        None => {
+            let detail = if pr.comment_count == 0 {
+                "none".to_string()
+            } else {
+                format!("{}", pr.comment_count)
+            };
+            let header = format_col_header("Comments", &detail, col_w, c);
+            let bar = if pr.comment_count == 0 {
+                c.gray("░".repeat(col_w))
+            } else {
+                c.cyan("━".repeat(col_w))
+            };
+            (header, bar)
+        }
+    }
+}
+
+fn overview_approvals_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
+    let approved = pr
+        .reviews
+        .iter()
+        .filter(|r| r.state == ReviewState::Approved)
+        .count();
+    let changes = pr
+        .reviews
+        .iter()
+        .filter(|r| r.state == ReviewState::ChangesRequested)
+        .count();
+    let requested = pr.review_requests.len();
+
+    let detail = if changes > 0 {
+        format!("{changes} changes")
+    } else if approved > 0 {
+        format!("{approved} approved")
+    } else if requested > 0 {
+        format!("{requested} pending")
+    } else {
+        String::new()
+    };
+    let header = format_col_header("Approvals", &detail, col_w, c);
+    let total = approved + changes + requested;
+    let bar = if total == 0 {
+        c.gray("░".repeat(col_w))
+    } else {
+        let app_w = scale_segment(approved, total, col_w);
+        let chg_w = scale_segment(changes, total, col_w).min(col_w - app_w);
+        let rem_w = col_w - app_w - chg_w;
+        format!(
+            "{}{}{}",
+            c.green("━".repeat(app_w)),
+            c.red("━".repeat(chg_w)),
+            c.gray("━".repeat(rem_w)),
+        )
+    };
+    (header, bar)
 }
 
 fn write_box_line(
@@ -777,6 +1076,7 @@ mod tests {
             }],
             body: "<!-- hidden -->\nSummary line".to_string(),
             comment_count: 1,
+            review_threads: None,
         }
     }
 
@@ -787,6 +1087,7 @@ mod tests {
         let opts = RenderOpts {
             width: 80,
             compact: false,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -814,6 +1115,7 @@ mod tests {
         let opts = RenderOpts {
             width: 80,
             compact: true,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -834,6 +1136,7 @@ mod tests {
         let opts = RenderOpts {
             width: 80,
             compact: true,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -855,6 +1158,7 @@ mod tests {
         let opts = RenderOpts {
             width: 80,
             compact: false,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -877,6 +1181,7 @@ mod tests {
         let opts = RenderOpts {
             width: 80,
             compact: true,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -894,6 +1199,39 @@ mod tests {
                     line
                 );
             }
+        }
+    }
+
+    #[test]
+    fn renders_overview_card_with_three_columns() {
+        let mut pr = sample_pr();
+        pr.merge_state = MergeState::Unstable;
+        pr.review_threads = Some(crate::model::ThreadCounts {
+            total: 5,
+            resolved: 2,
+            unresolved: 3,
+        });
+        let mut buf = Vec::new();
+        let opts = RenderOpts {
+            width: 80,
+            compact: false,
+            hud: true,
+            all_files: false,
+            full_body: false,
+            all_checks: false,
+            now_secs: crate::model::parse_iso_utc("2026-11-18T12:00:00Z").unwrap(),
+            glyphs: Glyphs::new(false),
+        };
+        render_pr(&pr, &Colour::new(false), opts, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("Able to merge"));
+        assert!(text.contains("Checks"));
+        assert!(text.contains("1 failing"));
+        assert!(text.contains("Comments"));
+        assert!(text.contains("3 unresolved"));
+        assert!(text.contains("Approvals"));
+        for line in text.lines() {
+            assert_eq!(visible_width(line), 80, "line width mismatch: {line}");
         }
     }
 }

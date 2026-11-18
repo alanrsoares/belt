@@ -89,6 +89,13 @@ pub struct Label {
     pub color: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadCounts {
+    pub total: usize,
+    pub resolved: usize,
+    pub unresolved: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequest {
     pub number: u64,
@@ -115,6 +122,7 @@ pub struct PullRequest {
     pub files: Vec<FileChange>,
     pub body: String,
     pub comment_count: usize,
+    pub review_threads: Option<ThreadCounts>,
 }
 
 impl PullRequest {
@@ -219,6 +227,7 @@ impl PullRequest {
             files,
             body,
             comment_count,
+            review_threads: None,
         })
     }
 }

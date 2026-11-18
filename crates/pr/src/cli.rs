@@ -16,6 +16,7 @@ pub struct Parsed {
     pub target: Option<String>,
     pub repo: Option<String>,
     pub compact: bool,
+    pub hud: bool,
     pub all_files: bool,
     pub full_body: bool,
     pub all_checks: bool,
@@ -30,6 +31,7 @@ impl Default for Parsed {
             target: None,
             repo: None,
             compact: false,
+            hud: false,
             all_files: false,
             full_body: false,
             all_checks: false,
@@ -59,6 +61,7 @@ USAGE
 OPTIONS
     -R, --repo <OWNER/REPO>   select repository ([HOST/]OWNER/REPO)
     -c, --compact             compact view (omit commits, files, body)
+        --hud                 merge-readiness HUD card (checks, comments, approvals)
     -f, --files               show all changed files (default: top 10)
     -b, --body                show full PR description (default: 10-line preview)
         --checks              show all status checks
@@ -81,6 +84,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "-V" | "--version" => p.action = Action::Version,
             "-w" | "--web" => p.action = Action::Web,
             "-c" | "--compact" => p.compact = true,
+            "--hud" => p.hud = true,
             "-f" | "--files" => p.all_files = true,
             "-b" | "--body" => p.full_body = true,
             "--checks" => p.all_checks = true,

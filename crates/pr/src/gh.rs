@@ -10,7 +10,7 @@ use std::time::Duration;
 use local_common::json::{parse, JsonValue};
 use local_common::{Colour, SPINNER};
 
-use crate::model::FileChange;
+use crate::model::{FileChange, ThreadCounts};
 
 pub const PR_FIELDS: &str = "number,title,url,state,isDraft,author,baseRefName,headRefName,\
 createdAt,updatedAt,mergedAt,closedAt,additions,deletions,changedFiles,mergeable,\
@@ -92,21 +92,26 @@ pub fn fetch_pr_json(
     String::from_utf8(output.stdout).map_err(|e| format!("`gh` emitted non-UTF-8 output: {e}"))
 }
 
-/// Build the argv for `gh api --paginate --slurp` to fetch every changed file
-/// for a PR URL (`https://<host>/<owner>/<repo>/pull/<number>`).
-pub fn build_files_api_args(url: &str) -> Option<Vec<String>> {
+fn parse_pr_url(url: &str) -> Option<(&str, &str, &str, u64)> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() < 5 || parts[3] != "pull" {
+    let mut parts = rest.split('/');
+    let host = parts.next()?;
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next()? != "pull" {
         return None;
     }
-    let host = parts[0];
-    let owner = parts[1];
-    let repo = parts[2];
-    let number_str = parts[4].split(['?', '#']).next()?;
+    let number_str = parts.next()?.split(['?', '#']).next()?;
     let number: u64 = number_str.parse().ok()?;
+    Some((host, owner, repo, number))
+}
+
+/// Build the argv for `gh api --paginate --slurp` to fetch every changed file
+/// for a PR URL (`https://<host>/<owner>/<repo>/pull/<number>`).
+pub fn build_files_api_args(url: &str) -> Option<Vec<String>> {
+    let (host, owner, repo, number) = parse_pr_url(url)?;
 
     let mut args = vec![
         "api".to_string(),
@@ -190,6 +195,89 @@ pub fn fetch_all_pr_files(url: &str) -> Result<Vec<FileChange>, String> {
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| format!("`gh api` emitted non-UTF-8 output: {e}"))?;
     parse_paginated_files_json(&stdout)
+}
+
+const THREADS_QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!) { \
+  repository(owner: $owner, name: $repo) { \
+    pullRequest(number: $number) { \
+      reviewThreads(first: 100) { totalCount nodes { isResolved } } \
+    } \
+  } \
+}";
+
+/// Build `gh api graphql` argv to fetch review thread resolution counts.
+pub fn build_threads_graphql_args(url: &str) -> Option<Vec<String>> {
+    let (host, owner, repo, number) = parse_pr_url(url)?;
+    let mut args = vec!["api".to_string(), "graphql".to_string()];
+    if !host.eq_ignore_ascii_case("github.com") {
+        args.push("--hostname".to_string());
+        args.push(host.to_string());
+    }
+    args.extend([
+        "-f".to_string(),
+        format!("query={THREADS_QUERY}"),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("repo={repo}"),
+        "-F".to_string(),
+        format!("number={number}"),
+    ]);
+    Some(args)
+}
+
+pub fn parse_review_threads_json(raw: &str) -> Result<ThreadCounts, String> {
+    let root = parse(raw).map_err(|e| format!("failed to parse `gh api graphql` JSON: {e}"))?;
+    let threads = root
+        .get("data")
+        .and_then(|d| d.get("repository"))
+        .and_then(|r| r.get("pullRequest"))
+        .and_then(|p| p.get("reviewThreads"))
+        .ok_or_else(|| "missing `reviewThreads` in `gh api graphql` response".to_string())?;
+
+    let nodes = threads
+        .get("nodes")
+        .and_then(JsonValue::as_array)
+        .unwrap_or(&[]);
+    let resolved = nodes
+        .iter()
+        .filter(|n| n.get("isResolved").and_then(JsonValue::as_bool) == Some(true))
+        .count();
+    let unresolved = nodes.len().saturating_sub(resolved);
+    let total = threads
+        .get("totalCount")
+        .and_then(JsonValue::as_i64)
+        .map(|n| n.max(0) as usize)
+        .unwrap_or(nodes.len());
+    Ok(ThreadCounts {
+        total,
+        resolved,
+        unresolved: total.saturating_sub(resolved).max(unresolved),
+    })
+}
+
+/// Fetch review thread resolution counts for a PR via `gh api graphql`.
+pub fn fetch_review_threads(url: &str) -> Result<ThreadCounts, String> {
+    let args = build_threads_graphql_args(url)
+        .ok_or_else(|| format!("cannot derive repository/PR number from URL: {url}"))?;
+    let output = Command::new("gh")
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run `gh api graphql`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("`gh api graphql` exited with {}", output.status)
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("`gh api graphql` emitted non-UTF-8 output: {e}"))?;
+    parse_review_threads_json(&stdout)
 }
 
 /// Open a PR in the user's default browser via `gh pr view --web`.
