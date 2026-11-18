@@ -20,6 +20,7 @@ members = [
     "crates/fanout",
     "crates/webdriver",
     "crates/grabsite",
+    "crates/pr",
     "crates/belt",
 ]
 default-members = [
@@ -31,6 +32,7 @@ default-members = [
     "crates/fanout",
     "crates/webdriver",
     "crates/grabsite",
+    "crates/pr",
     "crates/belt",
 ]
 

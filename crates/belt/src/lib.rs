@@ -60,6 +60,11 @@ pub const TOOLS: &[Tool] = &[
         summary: "Screenshot a page in a GUI browser for builds with CDP disabled.",
         destructive: false,
     },
+    Tool {
+        name: "pr",
+        summary: "Terminal-friendly GitHub pull request overview (infers PR from current git cwd by default).",
+        destructive: false,
+    },
 ];
 
 /// A typed browser tool. It maps named string parameters onto one `webdriver`
@@ -149,7 +154,8 @@ pub fn find_tool(name: &str) -> Option<&'static Tool> {
 
 /// The tool's binary next to this executable, else the bare name for `PATH`.
 pub fn resolve_bin(name: &str) -> PathBuf {
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let bin = if name == "pr" { "belt-pr" } else { name };
+    let file = format!("{bin}{}", std::env::consts::EXE_SUFFIX);
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(&file)))

@@ -78,6 +78,7 @@ belt/
 | **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout check:full --dry-run`<br>`fanout --filter '@renkonos/*' --topological` |
 | **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine. Terse one-line-per-step output (`ok` / `warn` / `err`), `text=` and `role=` locators, buffered console errors, streaming `--repl` | `webdriver --session my-app http://localhost:3000 wait-for-hydration click 'role=button:Save' console`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --repl < script.wd`<br>`webdriver --list-sessions` |
 | **`grabsite`** | Hardened GUI browser screenshot engine for CDP-disabled builds (Mullvad Browser, Tor Browser) via private virtual displays & settled-pixel detection | `grabsite https://example.com`<br>`grabsite --browser chrome https://example.com`<br>`grabsite -o shot.png --timeout 120 https://example.com`<br>`grabsite --display :0 https://example.com` |
+| **`belt-pr`** (`belt pr`) | Terminal-friendly, visually compelling GitHub pull request overview (infers PR from current git cwd by default) | `belt-pr`<br>`belt pr 142`<br>`belt-pr -c`<br>`belt-pr --checks --files` |
 | **`belt`** | Runs any belt tool by name and serves every tool as a stdio MCP server | `belt jwt <TOKEN>`<br>`belt mcp` |
 
 ### `belt` as an MCP server
@@ -198,4 +199,5 @@ the mode: `NO_COLOR` on a terminal keeps the live view.
 - ✅ `fanout` — concurrent quality gate & task matrix runner with interactive TUI. Test-covered.
 - ✅ `webdriver` — zero-dependency browser automation, DSL runner & screenshot engine. Test-covered.
 - ✅ `grabsite` — GUI browser screenshot engine for CDP-disabled builds. Test-covered.
+- ✅ `belt-pr` (`belt pr`) — Terminal-friendly GitHub pull request overview. Test-covered.
 - ✅ `belt` — tool dispatcher and stdio MCP server. Test-covered.

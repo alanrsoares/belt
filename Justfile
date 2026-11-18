@@ -56,7 +56,7 @@ install tool:
 
 # Install all CLI tools into ~/.cargo/bin
 install-all:
-    @for tool in scaffold portkill jwt devclean fanout webdriver grabsite belt; do \
+    @for tool in scaffold portkill jwt devclean fanout webdriver grabsite pr belt; do \
         echo "==> Installing $tool..."; \
         cargo install --path "crates/$tool" --force; \
     done

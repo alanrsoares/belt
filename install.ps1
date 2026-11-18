@@ -19,7 +19,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Repo = "alanrsoares/belt"
-$AllTools = @("scaffold", "portkill", "jwt", "devclean", "fanout", "webdriver", "grabsite", "belt")
+$AllTools = @("scaffold", "portkill", "jwt", "devclean", "fanout", "webdriver", "grabsite", "belt-pr", "belt")
+$LegacyTools = @("scaffold", "portkill", "jwt", "devclean", "fanout", "webdriver", "grabsite", "belt")
 $DefaultBinDir = Join-Path $HOME ".local\bin"
 $BinDir = if ($env:BELT_BIN_DIR) { $env:BELT_BIN_DIR } else { $DefaultBinDir }
 $Token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } else { "" }
@@ -32,6 +33,8 @@ if ($Tools.Count -gt 0) {
         }
     }
     $SelectedTools = $Tools
+} elseif ($env:BELT_VERSION -match '^v?(0\.1\.|0\.2\.|0\.3\.0$)') {
+    $SelectedTools = $LegacyTools
 } else {
     $SelectedTools = $AllTools
 }
