@@ -48,7 +48,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
 }
 
 fn run_view(p: &Parsed, c: &local_common::Colour, out: &mut impl Write) -> i32 {
-    let raw = match gh::fetch_pr_json(p.target.as_deref(), p.repo.as_deref()) {
+    let raw = match gh::fetch_pr_json(p.target.as_deref(), p.repo.as_deref(), c) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{} {e}", c.red("error:"));
