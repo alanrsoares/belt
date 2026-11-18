@@ -1,8 +1,8 @@
 //! Terminal rendering, ANSI formatting, and TUI widgets for `fanout`.
 
 pub use local_common::{
-    draw_meter as common_draw_meter, format_duration, strip_ansi, terminal_columns, terminal_rows,
-    visible_width, CursorGuard, PALETTE, SPINNER,
+    draw_meter as common_draw_meter, format_duration, nerdfont_enabled_for, strip_ansi,
+    terminal_columns, terminal_rows, visible_width, CursorGuard, Glyphs, PALETTE, SPINNER,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,11 +27,22 @@ impl Outcome {
 
 pub struct Styles {
     pub enabled: bool,
+    pub glyphs: Glyphs,
 }
 
 impl Styles {
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            glyphs: Glyphs::new(false),
+        }
+    }
+
+    pub fn with_glyphs(enabled: bool, nerdfont: bool) -> Self {
+        Self {
+            enabled,
+            glyphs: Glyphs::new(nerdfont),
+        }
     }
 
     pub fn sgr<'a>(&self, code: &'a str) -> &'a str {
@@ -88,18 +99,19 @@ pub fn draw_meter(ratio: f64, width: usize, color: &str, s: &Styles) -> String {
 }
 
 pub fn phase_icon(phase: Outcome, s: &Styles, frame: usize) -> String {
+    let g = &s.glyphs;
     match phase {
-        Outcome::Pending => format!("{}◌{}", s.gray(), s.reset()),
+        Outcome::Pending => format!("{}{}{}", s.gray(), g.pending(), s.reset()),
         Outcome::Running => format!(
             "{}{}{}",
             s.cyan(),
             SPINNER[frame % SPINNER.len()],
             s.reset()
         ),
-        Outcome::Passed => format!("{}✔{}", s.green(), s.reset()),
-        Outcome::Failed(_) => format!("{}✖{}", s.red(), s.reset()),
-        Outcome::Cancelled => format!("{}⊘{}", s.gray(), s.reset()),
-        Outcome::Timeout => format!("{}⏱{}", s.yellow(), s.reset()),
+        Outcome::Passed => format!("{}{}{}", s.green(), g.ok(), s.reset()),
+        Outcome::Failed(_) => format!("{}{}{}", s.red(), g.err(), s.reset()),
+        Outcome::Cancelled => format!("{}{}{}", s.gray(), g.cancel(), s.reset()),
+        Outcome::Timeout => format!("{}{}{}", s.yellow(), g.timeout(), s.reset()),
     }
 }
 

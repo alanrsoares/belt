@@ -16,8 +16,8 @@ use crate::cli::Options;
 use crate::dag::{TaskGraph, TurboPipeline};
 use crate::report;
 use crate::ui::{
-    draw_meter, format_duration, phase_icon, phase_text, terminal_columns, terminal_rows,
-    visible_width, Outcome, Styles,
+    draw_meter, format_duration, nerdfont_enabled_for, phase_icon, phase_text, terminal_columns,
+    terminal_rows, visible_width, Outcome, Styles,
 };
 use crate::workspace::{TaskSpec, WorkspacePkg};
 
@@ -124,7 +124,7 @@ pub fn execute_tasks(
         Mode::Report
     };
 
-    let styles = Styles::new(color_enabled);
+    let styles = Styles::with_glyphs(color_enabled, nerdfont_enabled_for(&io::stdout()));
     let interactive = mode == Mode::Live;
 
     let gutter = tasks.iter().map(|t| t.name.len()).max().unwrap_or(10);
@@ -939,28 +939,16 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
         let color = s.task_color(r.color_idx);
         let name_padded = r.name.pad_right(gutter);
 
-        let icon = match r.outcome {
-            Outcome::Passed => format!("{}✔{}", s.green(), s.reset()),
-            Outcome::Failed(_) => format!("{}✖{}", s.red(), s.reset()),
-            Outcome::Timeout => format!("{}⏱{}", s.yellow(), s.reset()),
-            Outcome::Cancelled => format!("{}⊘{}", s.gray(), s.reset()),
-            _ => " ".to_string(),
-        };
+        let icon = phase_icon(r.outcome, s, 0);
 
         let dur_fraction = r.duration.as_secs_f64() / max_dur;
-        let bar_len = ((dur_fraction * max_bar_width as f64).round() as usize).max(1);
-
-        let bar = if r.outcome == Outcome::Cancelled {
-            format!("{}{}{}", s.gray(), "╌".repeat(bar_len), s.reset())
-        } else {
-            let bar_color = match r.outcome {
-                Outcome::Passed => s.green(),
-                Outcome::Failed(_) => s.red(),
-                Outcome::Timeout => s.yellow(),
-                _ => s.gray(),
-            };
-            format!("{}{}{}", bar_color, "█".repeat(bar_len), s.reset())
+        let bar_color = match r.outcome {
+            Outcome::Passed => s.green(),
+            Outcome::Failed(_) => s.red(),
+            Outcome::Timeout => s.yellow(),
+            _ => s.gray(),
         };
+        let bar = draw_meter(dur_fraction, max_bar_width, bar_color, s);
 
         println!(
             "  {} {}{}{} {}({}){} {}",
@@ -982,9 +970,10 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
     println!();
     if failed.is_empty() && cancelled == 0 {
         println!(
-            "{}{} ✔ {} passed{} {}in {}{}",
+            "{}{} {} {} passed{} {}in {}{}",
             s.green(),
             s.bold(),
+            s.glyphs.ok(),
             results.len(),
             s.reset(),
             s.gray(),
@@ -998,9 +987,10 @@ fn print_verdict_summary(results: &[TaskResult], elapsed: Duration, gutter: usiz
             String::new()
         };
         println!(
-            "{}{} ✖ {} failed{}{}, {} passed{} {}in {}{}",
+            "{}{} {} {} failed{}{}, {} passed{} {}in {}{}",
             s.red(),
             s.bold(),
+            s.glyphs.err(),
             failed.len(),
             s.reset(),
             cancel_part,
