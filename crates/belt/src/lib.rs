@@ -60,6 +60,11 @@ pub const TOOLS: &[Tool] = &[
         summary: "Screenshot a page in a GUI browser for builds with CDP disabled.",
         destructive: false,
     },
+    Tool {
+        name: "pr",
+        summary: "Terminal-friendly GitHub pull request overview (infers PR from current git cwd by default).",
+        destructive: false,
+    },
 ];
 
 /// A typed browser tool. It maps named string parameters onto one `webdriver`
