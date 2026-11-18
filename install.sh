@@ -15,7 +15,8 @@
 set -eu
 
 REPO="alanrsoares/belt"
-ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite pr belt"
+ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite belt-pr belt"
+LEGACY_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite belt"
 BIN_DIR="${BELT_BIN_DIR:-$HOME/.local/bin}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
@@ -32,7 +33,10 @@ if [ "$#" -gt 0 ]; then
     esac
   done
 else
-  TOOLS="$ALL_TOOLS"
+  case "${BELT_VERSION:-}" in
+    v0.1.*|v0.2.*|v0.3.0|0.1.*|0.2.*|0.3.0) TOOLS="$LEGACY_TOOLS" ;;
+    *) TOOLS="$ALL_TOOLS" ;;
+  esac
 fi
 
 # --- downloader (curl or wget) -----------------------------------------------

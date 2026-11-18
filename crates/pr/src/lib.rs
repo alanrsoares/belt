@@ -57,17 +57,28 @@ fn run_view(p: &Parsed, c: &local_common::Colour, out: &mut impl Write) -> i32 {
     };
 
     if p.raw_json {
-        let _ = writeln!(out, "{}", raw.trim_end());
+        if let Err(e) = writeln!(out, "{}", raw.trim_end()) {
+            eprintln!("{} failed to write output: {e}", c.red("error:"));
+            return 1;
+        }
         return 0;
     }
 
-    let pr = match PullRequest::from_json_str(&raw) {
+    let mut pr = match PullRequest::from_json_str(&raw) {
         Ok(pr) => pr,
         Err(e) => {
             eprintln!("{} {e}", c.red("error:"));
             return 1;
         }
     };
+
+    if p.all_files && pr.changed_files > pr.files.len() as u64 {
+        match gh::fetch_all_pr_files(&pr.url) {
+            Ok(files) if !files.is_empty() => pr.files = files,
+            Ok(_) => {}
+            Err(e) => eprintln!("{} failed to fetch all changed files: {e}", c.yellow("warning:")),
+        }
+    }
 
     let opts = RenderOpts {
         width: terminal_columns(),

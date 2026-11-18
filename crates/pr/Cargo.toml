@@ -10,7 +10,7 @@ authors.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "pr"
+name = "belt-pr"
 path = "src/main.rs"
 
 [dependencies]

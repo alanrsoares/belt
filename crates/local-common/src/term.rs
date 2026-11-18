@@ -358,8 +358,8 @@ fn parse_bool_env(val: &str) -> Option<bool> {
 /// 1. Explicit `BELT_NERDFONT` / `NERDFONT` override.
 /// 2. Disabled when not a TTY, `TERM=dumb`, or `CI` is set.
 /// 3. Enabled for terminals with built-in NerdFont symbol fallback (`WezTerm`,
-///    `kitty`, `Ghostty`) or prompts that require NerdFont (`Starship`,
-///    `Oh My Posh`, `Powerlevel9k/10k`).
+///    `kitty`, `Ghostty`) or prompts that require NerdFont (`Oh My Posh`,
+///    `Powerlevel9k/10k`).
 pub fn nerdfont_decision(
     explicit_override: Option<bool>,
     stream_is_tty: bool,
@@ -403,8 +403,6 @@ pub fn nerdfont_enabled_for(stream: &impl IsTerminal) -> bool {
         "WEZTERM_EXECUTABLE",
         "KITTY_WINDOW_ID",
         "GHOSTTY_RESOURCES_DIR",
-        "STARSHIP_SHELL",
-        "STARSHIP_SESSION_KEY",
         "POSH_THEME",
         "POWERLEVEL9K_MODE",
     ]

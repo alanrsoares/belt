@@ -154,7 +154,8 @@ pub fn find_tool(name: &str) -> Option<&'static Tool> {
 
 /// The tool's binary next to this executable, else the bare name for `PATH`.
 pub fn resolve_bin(name: &str) -> PathBuf {
-    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let bin = if name == "pr" { "belt-pr" } else { name };
+    let file = format!("{bin}{}", std::env::consts::EXE_SUFFIX);
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(&file)))

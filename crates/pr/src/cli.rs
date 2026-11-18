@@ -39,21 +39,22 @@ impl Default for Parsed {
     }
 }
 
-pub const VERSION: &str = "pr 0.1.0";
+pub const VERSION: &str = "belt-pr 0.1.0";
 
-pub const HELP: &str = r#"pr [TARGET] [OPTIONS] — terminal-friendly GitHub pull request overview.
+pub const HELP: &str = r#"belt-pr [TARGET] [OPTIONS] — terminal-friendly GitHub pull request overview.
 
 Infers the pull request from the current git branch when TARGET is omitted.
+Also available via `belt pr`.
 
 USAGE
-    pr                              # PR for current git branch
-    pr 142                          # PR #142 in current repo
-    pr #142                         # same, leading '#' stripped
-    pr feat/auth                    # PR for branch feat/auth
-    pr https://github.com/o/r/pull/1
-    pr 142 -R owner/repo            # PR in another repository
-    pr -c                           # compact one-screen summary
-    pr --checks --files             # expand all checks and changed files
+    belt-pr                              # PR for current git branch
+    belt-pr 142                          # PR #142 in current repo
+    belt-pr #142                         # same, leading '#' stripped
+    belt-pr feat/auth                    # PR for branch feat/auth
+    belt-pr https://github.com/o/r/pull/1
+    belt-pr 142 -R owner/repo            # PR in another repository
+    belt-pr -c                           # compact one-screen summary
+    belt-pr --checks --files             # expand all checks and changed files
 
 OPTIONS
     -R, --repo <OWNER/REPO>   select repository ([HOST/]OWNER/REPO)
@@ -93,10 +94,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
                 if p.target.is_some() {
                     return Err(format!("unexpected argument: {s}"));
                 }
-                let normalized = s.strip_prefix('#').unwrap_or(s);
-                if normalized.is_empty() {
-                    return Err("invalid PR target: `#`".to_string());
-                }
+                let normalized = match s.strip_prefix('#') {
+                    Some("") => return Err("invalid PR target: `#`".to_string()),
+                    Some(rest) if rest.chars().all(|c| c.is_ascii_digit()) => rest,
+                    _ => s,
+                };
                 p.target = Some(normalized.to_string());
             }
         }
@@ -125,6 +127,12 @@ mod tests {
     fn strips_hash_from_pr_number() {
         let p = parse(args(&["#142"])).unwrap();
         assert_eq!(p.target.as_deref(), Some("142"));
+    }
+
+    #[test]
+    fn preserves_hash_in_branch_name() {
+        let p = parse(args(&["#topic"])).unwrap();
+        assert_eq!(p.target.as_deref(), Some("#topic"));
     }
 
     #[test]

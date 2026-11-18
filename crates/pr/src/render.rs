@@ -463,7 +463,10 @@ fn render_body(
     full_body: bool,
     out: &mut impl Write,
 ) -> std::io::Result<()> {
-    let cleaned = strip_html_comments(&pr.body);
+    let cleaned: String = strip_html_comments(&pr.body)
+        .chars()
+        .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+        .collect();
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -523,10 +526,148 @@ fn strip_html_comments(input: &str) -> String {
 }
 
 fn wrap_plain_or_styled(s: &str, max_w: usize) -> Vec<String> {
-    if visible_width(s) <= max_w {
+    if max_w == 0 || visible_width(s) <= max_w {
         return vec![s.to_string()];
     }
-    vec![s.to_string()]
+
+    enum Token {
+        Ansi(String),
+        Space,
+        Char(char),
+    }
+
+    let mut tokens = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            let mut seq = String::from(ch);
+            match chars.peek().copied() {
+                Some('[') => {
+                    seq.push(chars.next().unwrap());
+                    for c in chars.by_ref() {
+                        seq.push(c);
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    seq.push(chars.next().unwrap());
+                    while let Some(c) = chars.next() {
+                        seq.push(c);
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            seq.push(chars.next().unwrap());
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            tokens.push(Token::Ansi(seq));
+        } else if ch == ' ' {
+            tokens.push(Token::Space);
+        } else {
+            tokens.push(Token::Char(ch));
+        }
+    }
+
+    // Group into space-separated words, preserving ANSI sequences in place.
+    let mut words: Vec<(Vec<Token>, usize)> = Vec::new();
+    let mut cur_word = Vec::new();
+    let mut cur_word_w = 0usize;
+    for tok in tokens {
+        match tok {
+            Token::Space => {
+                words.push((cur_word, cur_word_w));
+                cur_word = Vec::new();
+                cur_word_w = 0;
+            }
+            Token::Char(c) => {
+                cur_word_w += 1;
+                cur_word.push(Token::Char(c));
+            }
+            Token::Ansi(seq) => {
+                cur_word.push(Token::Ansi(seq));
+            }
+        }
+    }
+    words.push((cur_word, cur_word_w));
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    let mut active_sgr: Option<String> = None;
+
+    let update_sgr = |seq: &str, active: &mut Option<String>| {
+        if seq.starts_with("\x1b[") && seq.ends_with('m') {
+            if seq == "\x1b[0m" || seq == "\x1b[m" {
+                *active = None;
+            } else {
+                *active = Some(seq.to_string());
+            }
+        }
+    };
+
+    let flush_line = |cur: &mut String, cur_w: &mut usize, active: &Option<String>, lines: &mut Vec<String>| {
+        if active.is_some() {
+            cur.push_str("\x1b[0m");
+        }
+        lines.push(std::mem::take(cur));
+        *cur_w = 0;
+        if let Some(sgr) = active {
+            cur.push_str(sgr);
+        }
+    };
+
+    for (word, word_w) in words {
+        if cur_w > 0 && cur_w + 1 + word_w <= max_w {
+            cur.push(' ');
+            cur_w += 1;
+        } else if cur_w > 0 && word_w > 0 {
+            flush_line(&mut cur, &mut cur_w, &active_sgr, &mut lines);
+        }
+
+        if word_w > max_w {
+            for tok in word {
+                match tok {
+                    Token::Ansi(seq) => {
+                        update_sgr(&seq, &mut active_sgr);
+                        cur.push_str(&seq);
+                    }
+                    Token::Char(c) => {
+                        if cur_w >= max_w {
+                            flush_line(&mut cur, &mut cur_w, &active_sgr, &mut lines);
+                        }
+                        cur.push(c);
+                        cur_w += 1;
+                    }
+                    Token::Space => {}
+                }
+            }
+        } else {
+            for tok in word {
+                match tok {
+                    Token::Ansi(seq) => {
+                        update_sgr(&seq, &mut active_sgr);
+                        cur.push_str(&seq);
+                    }
+                    Token::Char(c) => {
+                        cur.push(c);
+                        cur_w += 1;
+                    }
+                    Token::Space => {}
+                }
+            }
+        }
+    }
+
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 fn wrap_text(s: &str, max_w: usize) -> Vec<String> {
@@ -704,5 +845,55 @@ mod tests {
         assert!(!text.contains("Commits ("));
         assert!(!text.contains("Files ("));
         assert!(!text.contains("Description"));
+    }
+
+    #[test]
+    fn strips_terminal_control_sequences_from_body() {
+        let mut pr = sample_pr();
+        pr.body = "Hello \x1b[31mred\x1b[0m\x1b]0;pwned\x07\tworld\nLine 2".to_string();
+        let mut buf = Vec::new();
+        let opts = RenderOpts {
+            width: 80,
+            compact: false,
+            all_files: false,
+            full_body: false,
+            all_checks: false,
+            now_secs: crate::model::parse_iso_utc("2026-11-18T12:00:00Z").unwrap(),
+            glyphs: Glyphs::new(false),
+        };
+        render_pr(&pr, &Colour::new(false), opts, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(!text.contains('\x1b'));
+        assert!(!text.contains('\x07'));
+        assert!(text.contains("Hello [31mred[0m]0;pwned\tworld"));
+        assert!(text.contains("Line 2"));
+    }
+
+    #[test]
+    fn wraps_long_metadata_within_header_box_width() {
+        let mut pr = sample_pr();
+        pr.head_ref = "feat/".to_string() + &"very-long-branch-segment-".repeat(4);
+        let mut buf = Vec::new();
+        let opts = RenderOpts {
+            width: 80,
+            compact: true,
+            all_files: false,
+            full_body: false,
+            all_checks: false,
+            now_secs: crate::model::parse_iso_utc("2026-11-18T12:00:00Z").unwrap(),
+            glyphs: Glyphs::new(false),
+        };
+        render_pr(&pr, &Colour::new(true), opts, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        for line in text.lines() {
+            if line.contains('│') {
+                assert!(
+                    visible_width(line) <= 80,
+                    "box line exceeded width 80: {} ({})",
+                    visible_width(line),
+                    line
+                );
+            }
+        }
     }
 }
