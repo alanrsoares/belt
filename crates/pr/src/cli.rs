@@ -61,7 +61,7 @@ USAGE
 OPTIONS
     -R, --repo <OWNER/REPO>   select repository ([HOST/]OWNER/REPO)
     -c, --compact             compact view (omit commits, files, body)
-        --hud                 merge-readiness HUD card (checks, comments, approvals)
+        --hud                 merge-readiness HUD card (checks, review threads, approvals)
     -f, --files               show all changed files (default: top 10)
     -b, --body                show full PR description (default: 10-line preview)
         --checks              show all status checks
@@ -73,12 +73,35 @@ OPTIONS
     -V, --version             print version
 "#;
 
+/// Boolean flags: `--hud=false` must be an error, not a silent `--hud`.
+const SWITCHES: &[&str] = &[
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+    "-w",
+    "--web",
+    "-c",
+    "--compact",
+    "--hud",
+    "-f",
+    "--files",
+    "-b",
+    "--body",
+    "--checks",
+    "-j",
+    "--json",
+];
+
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
     let mut cursor = ArgCursor::new(args.into_iter());
     let mut p = Parsed::default();
 
     while let Some(a) = cursor.next() {
         let (flag, inline) = split_flag(&a);
+        if inline.is_some() && SWITCHES.contains(&flag) {
+            return Err(format!("{flag} does not take a value"));
+        }
         match flag {
             "-h" | "--help" => p.action = Action::Help,
             "-V" | "--version" => p.action = Action::Version,
@@ -155,6 +178,13 @@ mod tests {
         assert!(p.compact);
         assert!(p.all_checks);
         assert!(p.flags.no_color);
+    }
+
+    #[test]
+    fn rejects_values_on_switches() {
+        assert!(parse(args(&["--hud=false"])).is_err());
+        assert!(parse(args(&["--compact=0"])).is_err());
+        assert!(parse(args(&["--hud"])).unwrap().hud);
     }
 
     #[test]

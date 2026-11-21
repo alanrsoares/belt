@@ -14,7 +14,7 @@ use crate::model::{FileChange, ThreadCounts};
 
 pub const PR_FIELDS: &str = "number,title,url,state,isDraft,author,baseRefName,headRefName,\
 createdAt,updatedAt,mergedAt,closedAt,additions,deletions,changedFiles,mergeable,\
-mergeStateStatus,reviewDecision,latestReviews,reviewRequests,labels,commits,\
+mergeStateStatus,reviewDecision,latestReviews,reviews,reviewRequests,labels,commits,\
 statusCheckRollup,files,body,comments";
 
 /// Build the argv for `gh pr view`.
@@ -113,17 +113,16 @@ fn parse_pr_url(url: &str) -> Option<(&str, &str, &str, u64)> {
 pub fn build_files_api_args(url: &str) -> Option<Vec<String>> {
     let (host, owner, repo, number) = parse_pr_url(url)?;
 
-    let mut args = vec![
+    // Always pin the host: without `--hostname`, `gh api` falls back to its
+    // default host (`GH_HOST`), which may serve an unrelated PR with this path.
+    Some(vec![
         "api".to_string(),
         "--paginate".to_string(),
         "--slurp".to_string(),
-    ];
-    if !host.eq_ignore_ascii_case("github.com") {
-        args.push("--hostname".to_string());
-        args.push(host.to_string());
-    }
-    args.push(format!("repos/{owner}/{repo}/pulls/{number}/files?per_page=100"));
-    Some(args)
+        "--hostname".to_string(),
+        host.to_string(),
+        format!("repos/{owner}/{repo}/pulls/{number}/files?per_page=100"),
+    ])
 }
 
 /// Parse the JSON array (or slurped array of page arrays) returned by
@@ -197,23 +196,39 @@ pub fn fetch_all_pr_files(url: &str) -> Result<Vec<FileChange>, String> {
     parse_paginated_files_json(&stdout)
 }
 
-const THREADS_QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!) { \
+const THREADS_QUERY: &str =
+    "query($owner: String!, $repo: String!, $number: Int!, $cursor: String) { \
   repository(owner: $owner, name: $repo) { \
     pullRequest(number: $number) { \
-      reviewThreads(first: 100) { totalCount nodes { isResolved } } \
+      reviewThreads(first: 100, after: $cursor) { \
+        pageInfo { hasNextPage endCursor } \
+        nodes { isResolved } \
+      } \
     } \
   } \
 }";
 
-/// Build `gh api graphql` argv to fetch review thread resolution counts.
-pub fn build_threads_graphql_args(url: &str) -> Option<Vec<String>> {
+/// Upper bound on review-thread pages (100 threads each) fetched per PR.
+const MAX_THREAD_PAGES: usize = 50;
+
+/// Resolution counts for one page of review threads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadPage {
+    pub resolved: usize,
+    pub unresolved: usize,
+    /// Cursor for the next page, `None` on the last page.
+    pub next_cursor: Option<String>,
+}
+
+/// Build `gh api graphql` argv to fetch one page of review threads.
+pub fn build_threads_graphql_args(url: &str, cursor: Option<&str>) -> Option<Vec<String>> {
     let (host, owner, repo, number) = parse_pr_url(url)?;
-    let mut args = vec!["api".to_string(), "graphql".to_string()];
-    if !host.eq_ignore_ascii_case("github.com") {
-        args.push("--hostname".to_string());
-        args.push(host.to_string());
-    }
-    args.extend([
+    // Always pin the host so a `GH_HOST` default cannot answer for another PR.
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "--hostname".to_string(),
+        host.to_string(),
         "-f".to_string(),
         format!("query={THREADS_QUERY}"),
         "-f".to_string(),
@@ -222,11 +237,18 @@ pub fn build_threads_graphql_args(url: &str) -> Option<Vec<String>> {
         format!("repo={repo}"),
         "-F".to_string(),
         format!("number={number}"),
-    ]);
+    ];
+    if let Some(cursor) = cursor {
+        args.push("-f".to_string());
+        args.push(format!("cursor={cursor}"));
+    }
     Some(args)
 }
 
-pub fn parse_review_threads_json(raw: &str) -> Result<ThreadCounts, String> {
+/// Parse one page of the review-thread query. Only threads that carry an
+/// explicit `isResolved` boolean are counted, so a malformed node fails the
+/// page instead of silently counting as unresolved.
+pub fn parse_review_threads_page(raw: &str) -> Result<ThreadPage, String> {
     let root = parse(raw).map_err(|e| format!("failed to parse `gh api graphql` JSON: {e}"))?;
     let threads = root
         .get("data")
@@ -238,27 +260,41 @@ pub fn parse_review_threads_json(raw: &str) -> Result<ThreadCounts, String> {
     let nodes = threads
         .get("nodes")
         .and_then(JsonValue::as_array)
-        .unwrap_or(&[]);
-    let resolved = nodes
-        .iter()
-        .filter(|n| n.get("isResolved").and_then(JsonValue::as_bool) == Some(true))
-        .count();
-    let unresolved = nodes.len().saturating_sub(resolved);
-    let total = threads
-        .get("totalCount")
-        .and_then(JsonValue::as_i64)
-        .map(|n| n.max(0) as usize)
-        .unwrap_or(nodes.len());
-    Ok(ThreadCounts {
-        total,
+        .ok_or_else(|| "missing `nodes` in `reviewThreads` response".to_string())?;
+
+    let (mut resolved, mut unresolved) = (0, 0);
+    for node in nodes {
+        match node.get("isResolved").and_then(JsonValue::as_bool) {
+            Some(true) => resolved += 1,
+            Some(false) => unresolved += 1,
+            None => return Err("review thread without `isResolved` flag".to_string()),
+        }
+    }
+
+    let page_info = threads.get("pageInfo");
+    let has_next = page_info
+        .and_then(|p| p.get("hasNextPage"))
+        .and_then(JsonValue::as_bool)
+        .unwrap_or(false);
+    let next_cursor = if has_next {
+        let cursor = page_info
+            .and_then(|p| p.get("endCursor"))
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| "`hasNextPage` without `endCursor`".to_string())?;
+        Some(cursor.to_string())
+    } else {
+        None
+    };
+
+    Ok(ThreadPage {
         resolved,
-        unresolved: total.saturating_sub(resolved).max(unresolved),
+        unresolved,
+        next_cursor,
     })
 }
 
-/// Fetch review thread resolution counts for a PR via `gh api graphql`.
-pub fn fetch_review_threads(url: &str) -> Result<ThreadCounts, String> {
-    let args = build_threads_graphql_args(url)
+fn fetch_threads_page(url: &str, cursor: Option<&str>) -> Result<ThreadPage, String> {
+    let args = build_threads_graphql_args(url, cursor)
         .ok_or_else(|| format!("cannot derive repository/PR number from URL: {url}"))?;
     let output = Command::new("gh")
         .args(&args)
@@ -277,7 +313,33 @@ pub fn fetch_review_threads(url: &str) -> Result<ThreadCounts, String> {
 
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| format!("`gh api graphql` emitted non-UTF-8 output: {e}"))?;
-    parse_review_threads_json(&stdout)
+    parse_review_threads_page(&stdout)
+}
+
+/// Fetch review thread resolution counts for a PR via `gh api graphql`,
+/// following the cursor through every page. Any failed page fails the whole
+/// fetch, so callers never see a partial count.
+pub fn fetch_review_threads(url: &str) -> Result<ThreadCounts, String> {
+    let (mut resolved, mut unresolved) = (0, 0);
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_THREAD_PAGES {
+        let page = fetch_threads_page(url, cursor.as_deref())?;
+        resolved += page.resolved;
+        unresolved += page.unresolved;
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => {
+                return Ok(ThreadCounts {
+                    total: resolved + unresolved,
+                    resolved,
+                    unresolved,
+                })
+            }
+        }
+    }
+    Err(format!(
+        "more than {MAX_THREAD_PAGES} pages of review threads"
+    ))
 }
 
 /// Open a PR in the user's default browser via `gh pr view --web`.
@@ -334,6 +396,8 @@ mod tests {
                 "api",
                 "--paginate",
                 "--slurp",
+                "--hostname",
+                "github.com",
                 "repos/alanrsoares/belt/pulls/10/files?per_page=100"
             ]
         );
@@ -350,6 +414,37 @@ mod tests {
                 "repos/org/repo/pulls/99/files?per_page=100"
             ]
         );
+    }
+
+    #[test]
+    fn threads_query_pins_host_and_cursor() {
+        let first = build_threads_graphql_args("https://github.com/o/r/pull/7", None).unwrap();
+        assert_eq!(&first[..4], ["api", "graphql", "--hostname", "github.com"]);
+        assert!(first.iter().all(|a| !a.starts_with("cursor=")));
+
+        let next =
+            build_threads_graphql_args("https://ghe.example.com/o/r/pull/7", Some("abc")).unwrap();
+        assert_eq!(&next[2..4], ["--hostname", "ghe.example.com"]);
+        assert_eq!(&next[next.len() - 2..], ["-f", "cursor=abc"]);
+    }
+
+    #[test]
+    fn parses_thread_page_with_next_cursor() {
+        let raw = r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{
+            "pageInfo":{"hasNextPage":true,"endCursor":"C1"},
+            "nodes":[{"isResolved":true},{"isResolved":true},{"isResolved":false}]}}}}}"#;
+        let page = parse_review_threads_page(raw).unwrap();
+        assert_eq!(page.resolved, 2);
+        assert_eq!(page.unresolved, 1);
+        assert_eq!(page.next_cursor.as_deref(), Some("C1"));
+    }
+
+    #[test]
+    fn thread_page_without_resolution_flag_is_an_error() {
+        let raw = r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{
+            "pageInfo":{"hasNextPage":false,"endCursor":null},
+            "nodes":[{"isResolved":true},{}]}}}}}"#;
+        assert!(parse_review_threads_page(raw).is_err());
     }
 
     #[test]

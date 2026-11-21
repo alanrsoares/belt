@@ -25,6 +25,13 @@ const MAX_DEFAULT_COMMITS: usize = 5;
 const MAX_DEFAULT_FILES: usize = 10;
 const MAX_PREVIEW_BODY_LINES: usize = 10;
 
+// HUD meter segments. Each category has its own glyph so the bars stay
+// readable when colour is off.
+const SEG_GOOD: &str = "█";
+const SEG_BAD: &str = "▓";
+const SEG_WAIT: &str = "▒";
+const SEG_EMPTY: &str = "░";
+
 pub fn render_pr(
     pr: &PullRequest,
     c: &Colour,
@@ -160,13 +167,25 @@ fn render_hud(
 
     // Col 1: Checks
     let (checks_label, checks_bar) = overview_checks_col(pr, c, c1);
-    // Col 2: Comments
-    let (comments_label, comments_bar) = overview_comments_col(pr, c, c2);
+    // Col 2: Review threads
+    let (comments_label, comments_bar) = overview_threads_col(pr, c, c2);
     // Col 3: Approvals
     let (approvals_label, approvals_bar) = overview_approvals_col(pr, c, c3);
 
-    write_overview_row(&[(&checks_label, c1), (&comments_label, c2), (&approvals_label, c3)], c, out)?;
-    write_overview_row(&[(&checks_bar, c1), (&comments_bar, c2), (&approvals_bar, c3)], c, out)?;
+    write_overview_row(
+        &[
+            (&checks_label, c1),
+            (&comments_label, c2),
+            (&approvals_label, c3),
+        ],
+        c,
+        out,
+    )?;
+    write_overview_row(
+        &[(&checks_bar, c1), (&comments_bar, c2), (&approvals_bar, c3)],
+        c,
+        out,
+    )?;
 
     let bottom = format!(
         "╰{}┴{}┴{}╯",
@@ -196,7 +215,11 @@ fn write_overview_row(
     writeln!(out, "{sep}")
 }
 
-fn overview_status(pr: &PullRequest, c: &Colour, g: &Glyphs) -> (String, &'static str, &'static str) {
+fn overview_status(
+    pr: &PullRequest,
+    c: &Colour,
+    g: &Glyphs,
+) -> (String, &'static str, &'static str) {
     let (fail, pending, _) = count_check_buckets(&pr.checks);
     match pr.state {
         PrState::Merged => (
@@ -233,15 +256,12 @@ fn overview_status(pr: &PullRequest, c: &Colour, g: &Glyphs) -> (String, &'stati
                         "Review required",
                         "At least 1 approving review is required",
                     ),
-                    _ if fail > 0 => (
-                        c.red(g.err()),
-                        "Merging is blocked",
-                        "Required checks are failing",
-                    ),
+                    // Check counts do not say which checks are required, and
+                    // other rules (signed commits, ...) can block too.
                     _ => (
                         c.yellow(g.pending()),
                         "Merging is blocked",
-                        "Waiting on required status checks",
+                        "See the pull request on GitHub for the blocking requirement",
                     ),
                 }
             } else if pr.merge_state == MergeState::Behind {
@@ -249,6 +269,12 @@ fn overview_status(pr: &PullRequest, c: &Colour, g: &Glyphs) -> (String, &'stati
                     c.yellow(g.pending()),
                     "Branch is out of date",
                     "Update branch with base before merging",
+                )
+            } else if pr.merge_state == MergeState::Unknown || pr.mergeable == Mergeable::Unknown {
+                (
+                    c.gray(g.pending()),
+                    "Merge status unknown",
+                    "GitHub has not finished computing mergeability; try again shortly",
                 )
             } else if pr.merge_state == MergeState::Unstable || fail > 0 || pending > 0 {
                 (
@@ -321,70 +347,64 @@ fn overview_checks_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, S
     };
     let header = format_col_header("Checks", &detail, col_w, c);
     let bar = if total == 0 {
-        c.gray("░".repeat(col_w))
+        c.gray(SEG_EMPTY.repeat(col_w))
     } else {
         let fail_w = scale_segment(fail, total, col_w);
         let pend_w = scale_segment(pending, total, col_w).min(col_w - fail_w);
         let pass_w = col_w - fail_w - pend_w;
         format!(
             "{}{}{}",
-            c.red("━".repeat(fail_w)),
-            c.yellow("━".repeat(pend_w)),
-            c.green("━".repeat(pass_w)),
+            c.red(SEG_BAD.repeat(fail_w)),
+            c.yellow(SEG_WAIT.repeat(pend_w)),
+            c.green(SEG_GOOD.repeat(pass_w)),
         )
     };
     (header, bar)
 }
 
-fn overview_comments_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
-    match pr.review_threads {
-        Some(t) => {
-            let detail = if t.total == 0 {
-                "none".to_string()
-            } else if t.unresolved > 0 {
-                format!("{} unresolved", t.unresolved)
-            } else {
-                "all resolved".to_string()
-            };
-            let header = format_col_header("Comments", &detail, col_w, c);
-            let bar = if t.total == 0 {
-                c.gray("░".repeat(col_w))
-            } else {
-                let res_w = scale_segment(t.resolved, t.total, col_w);
-                let unres_w = col_w - res_w;
-                format!(
-                    "{}{}",
-                    c.cyan("━".repeat(res_w)),
-                    c.gray("━".repeat(unres_w)),
-                )
-            };
-            (header, bar)
-        }
-        None => {
-            let detail = if pr.comment_count == 0 {
-                "none".to_string()
-            } else {
-                format!("{}", pr.comment_count)
-            };
-            let header = format_col_header("Comments", &detail, col_w, c);
-            let bar = if pr.comment_count == 0 {
-                c.gray("░".repeat(col_w))
-            } else {
-                c.cyan("━".repeat(col_w))
-            };
-            (header, bar)
-        }
-    }
+fn overview_threads_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
+    // Wide columns fit the full label; narrow ones keep room for the detail.
+    let title = if col_w >= 26 {
+        "Review threads"
+    } else {
+        "Threads"
+    };
+    // `review_threads` is only `None` when the thread query failed or has not
+    // run, which must not read the same as "no threads".
+    let Some(t) = pr.review_threads else {
+        let header = format_col_header(title, "unavailable", col_w, c);
+        return (header, c.gray(SEG_EMPTY.repeat(col_w)));
+    };
+    let detail = if t.total == 0 {
+        "none".to_string()
+    } else if t.unresolved > 0 {
+        format!("{} unresolved", t.unresolved)
+    } else {
+        "all resolved".to_string()
+    };
+    let header = format_col_header(title, &detail, col_w, c);
+    let bar = if t.total == 0 {
+        c.gray(SEG_EMPTY.repeat(col_w))
+    } else {
+        let res_w = scale_segment(t.resolved, t.total, col_w);
+        let unres_w = col_w - res_w;
+        format!(
+            "{}{}",
+            c.cyan(SEG_GOOD.repeat(res_w)),
+            c.yellow(SEG_WAIT.repeat(unres_w)),
+        )
+    };
+    (header, bar)
 }
 
 fn overview_approvals_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String, String) {
     let approved = pr
-        .reviews
+        .verdicts
         .iter()
         .filter(|r| r.state == ReviewState::Approved)
         .count();
     let changes = pr
-        .reviews
+        .verdicts
         .iter()
         .filter(|r| r.state == ReviewState::ChangesRequested)
         .count();
@@ -402,16 +422,16 @@ fn overview_approvals_col(pr: &PullRequest, c: &Colour, col_w: usize) -> (String
     let header = format_col_header("Approvals", &detail, col_w, c);
     let total = approved + changes + requested;
     let bar = if total == 0 {
-        c.gray("░".repeat(col_w))
+        c.gray(SEG_EMPTY.repeat(col_w))
     } else {
         let app_w = scale_segment(approved, total, col_w);
         let chg_w = scale_segment(changes, total, col_w).min(col_w - app_w);
         let rem_w = col_w - app_w - chg_w;
         format!(
             "{}{}{}",
-            c.green("━".repeat(app_w)),
-            c.red("━".repeat(chg_w)),
-            c.gray("━".repeat(rem_w)),
+            c.green(SEG_GOOD.repeat(app_w)),
+            c.red(SEG_BAD.repeat(chg_w)),
+            c.gray(SEG_WAIT.repeat(rem_w)),
         )
     };
     (header, bar)
@@ -910,16 +930,17 @@ fn wrap_plain_or_styled(s: &str, max_w: usize) -> Vec<String> {
         }
     };
 
-    let flush_line = |cur: &mut String, cur_w: &mut usize, active: &Option<String>, lines: &mut Vec<String>| {
-        if active.is_some() {
-            cur.push_str("\x1b[0m");
-        }
-        lines.push(std::mem::take(cur));
-        *cur_w = 0;
-        if let Some(sgr) = active {
-            cur.push_str(sgr);
-        }
-    };
+    let flush_line =
+        |cur: &mut String, cur_w: &mut usize, active: &Option<String>, lines: &mut Vec<String>| {
+            if active.is_some() {
+                cur.push_str("\x1b[0m");
+            }
+            lines.push(std::mem::take(cur));
+            *cur_w = 0;
+            if let Some(sgr) = active {
+                cur.push_str(sgr);
+            }
+        };
 
     for (word, word_w) in words {
         if cur_w > 0 && cur_w + 1 + word_w <= max_w {
@@ -1043,6 +1064,10 @@ mod tests {
             merge_state: MergeState::Clean,
             review_decision: ReviewDecision::Approved,
             reviews: vec![Review {
+                author: "alice".to_string(),
+                state: ReviewState::Approved,
+            }],
+            verdicts: vec![Review {
                 author: "alice".to_string(),
                 state: ReviewState::Approved,
             }],
@@ -1227,11 +1252,105 @@ mod tests {
         assert!(text.contains("Able to merge"));
         assert!(text.contains("Checks"));
         assert!(text.contains("1 failing"));
-        assert!(text.contains("Comments"));
+        assert!(text.contains("Threads"));
         assert!(text.contains("3 unresolved"));
         assert!(text.contains("Approvals"));
         for line in text.lines() {
             assert_eq!(visible_width(line), 80, "line width mismatch: {line}");
         }
+    }
+
+    fn hud_text(pr: &PullRequest) -> String {
+        let mut buf = Vec::new();
+        let opts = RenderOpts {
+            width: 100,
+            compact: false,
+            hud: true,
+            all_files: false,
+            full_body: false,
+            all_checks: false,
+            now_secs: crate::model::parse_iso_utc("2026-11-18T12:00:00Z").unwrap(),
+            glyphs: Glyphs::new(false),
+        };
+        render_pr(pr, &Colour::new(false), opts, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn unknown_merge_state_is_not_reported_as_ready() {
+        let mut pr = sample_pr();
+        pr.checks.clear();
+        pr.mergeable = Mergeable::Unknown;
+        pr.merge_state = MergeState::Unknown;
+        let text = hud_text(&pr);
+        assert!(text.contains("Merge status unknown"));
+        assert!(!text.contains("Able to merge"));
+        assert!(!text.contains("All checks and requirements satisfied"));
+    }
+
+    #[test]
+    fn confirmed_clean_pr_is_reported_ready() {
+        let mut pr = sample_pr();
+        pr.checks.clear();
+        assert!(hud_text(&pr).contains("All checks and requirements satisfied"));
+    }
+
+    #[test]
+    fn blocked_pr_does_not_guess_the_blocker() {
+        let mut pr = sample_pr();
+        pr.review_decision = ReviewDecision::None;
+        pr.merge_state = MergeState::Blocked;
+        let text = hud_text(&pr);
+        assert!(text.contains("Merging is blocked"));
+        assert!(!text.contains("required status checks"));
+        assert!(!text.contains("Required checks"));
+    }
+
+    #[test]
+    fn unavailable_threads_differ_from_no_threads() {
+        let mut pr = sample_pr();
+        assert!(hud_text(&pr).contains("Review threads unavailable"));
+        pr.review_threads = Some(crate::model::ThreadCounts::default());
+        let text = hud_text(&pr);
+        assert!(text.contains("Review threads none"));
+        assert!(!text.contains("unavailable"));
+    }
+
+    #[test]
+    fn check_bars_differ_by_proportion_without_colour() {
+        let bar_line = |passing: usize| {
+            let mut pr = sample_pr();
+            pr.checks = (0..passing)
+                .map(|i| Check {
+                    name: format!("ok{i}"),
+                    workflow: None,
+                    bucket: CheckBucket::Pass,
+                    url: None,
+                })
+                .chain([Check {
+                    name: "bad".to_string(),
+                    workflow: None,
+                    bucket: CheckBucket::Fail,
+                    url: None,
+                }])
+                .collect();
+            hud_text(&pr)
+                .lines()
+                .find(|l| l.contains(SEG_GOOD) || l.contains(SEG_BAD))
+                .unwrap()
+                .to_string()
+        };
+        assert_ne!(bar_line(1), bar_line(99));
+        assert!(bar_line(1).contains(SEG_BAD));
+        assert!(bar_line(1).contains(SEG_GOOD));
+    }
+
+    #[test]
+    fn approvals_count_standing_verdicts_not_latest_review() {
+        let mut pr = sample_pr();
+        // alice approved, then left a comment-only review: `reviews` shows the
+        // comment, `verdicts` still holds the approval.
+        pr.reviews[0].state = ReviewState::Commented;
+        assert!(hud_text(&pr).contains("1 approved"));
     }
 }

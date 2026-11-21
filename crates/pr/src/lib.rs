@@ -72,18 +72,25 @@ fn run_view(p: &Parsed, c: &local_common::Colour, out: &mut impl Write) -> i32 {
         }
     };
 
-    if p.all_files && pr.changed_files > pr.files.len() as u64 {
+    // The HUD never lists files, so skip the extra paginated request there.
+    if p.all_files && !p.hud && pr.changed_files > pr.files.len() as u64 {
         match gh::fetch_all_pr_files(&pr.url) {
             Ok(files) if !files.is_empty() => pr.files = files,
             Ok(_) => {}
-            Err(e) => eprintln!("{} failed to fetch all changed files: {e}", c.yellow("warning:")),
+            Err(e) => eprintln!(
+                "{} failed to fetch all changed files: {e}",
+                c.yellow("warning:")
+            ),
         }
     }
 
     if p.hud {
         match gh::fetch_review_threads(&pr.url) {
             Ok(counts) => pr.review_threads = Some(counts),
-            Err(e) => eprintln!("{} failed to fetch review threads: {e}", c.yellow("warning:")),
+            Err(e) => eprintln!(
+                "{} failed to fetch review threads: {e}",
+                c.yellow("warning:")
+            ),
         }
     }
 

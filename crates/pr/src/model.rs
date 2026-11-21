@@ -115,6 +115,9 @@ pub struct PullRequest {
     pub merge_state: MergeState,
     pub review_decision: ReviewDecision,
     pub reviews: Vec<Review>,
+    /// Each author's standing verdict: the latest approving or
+    /// change-requesting review, unaffected by later comment-only reviews.
+    pub verdicts: Vec<Review>,
     pub review_requests: Vec<String>,
     pub labels: Vec<Label>,
     pub commits: Vec<Commit>,
@@ -191,6 +194,10 @@ impl PullRequest {
         };
 
         let reviews = parse_reviews(v.get("latestReviews"));
+        let verdicts = match v.get("reviews") {
+            Some(all) => standing_verdicts(&parse_reviews(Some(all))),
+            None => standing_verdicts(&reviews),
+        };
         let review_requests = parse_review_requests(v.get("reviewRequests"));
         let labels = parse_labels(v.get("labels"));
         let commits = parse_commits(v.get("commits"));
@@ -220,6 +227,7 @@ impl PullRequest {
             merge_state,
             review_decision,
             reviews,
+            verdicts,
             review_requests,
             labels,
             commits,
@@ -265,6 +273,26 @@ fn parse_reviews(v: Option<&JsonValue>) -> Vec<Review> {
             Some(Review { author, state })
         })
         .collect()
+}
+
+/// Fold a chronological review history into one standing verdict per author.
+/// Approvals and change requests replace earlier verdicts, a dismissal clears
+/// one, and comment-only or pending reviews leave it untouched.
+fn standing_verdicts(history: &[Review]) -> Vec<Review> {
+    let mut out: Vec<Review> = Vec::new();
+    for r in history {
+        match r.state {
+            ReviewState::Approved | ReviewState::ChangesRequested => {
+                match out.iter_mut().find(|v| v.author == r.author) {
+                    Some(existing) => existing.state = r.state,
+                    None => out.push(r.clone()),
+                }
+            }
+            ReviewState::Dismissed => out.retain(|v| v.author != r.author),
+            ReviewState::Commented | ReviewState::Pending => {}
+        }
+    }
+    out
 }
 
 fn parse_review_requests(v: Option<&JsonValue>) -> Vec<String> {
@@ -501,12 +529,35 @@ mod tests {
         assert_eq!(pr.mergeable, Mergeable::Ready);
         assert_eq!(pr.review_decision, ReviewDecision::Approved);
         assert_eq!(pr.reviews.len(), 2);
+        assert_eq!(pr.verdicts.len(), 1);
         assert_eq!(pr.review_requests, vec!["carol"]);
         assert_eq!(pr.checks.len(), 3);
         assert_eq!(pr.checks[0].bucket, CheckBucket::Pass);
         assert_eq!(pr.checks[1].bucket, CheckBucket::Fail);
         assert_eq!(pr.checks[2].bucket, CheckBucket::Pending);
         assert_eq!(pr.comment_count, 2);
+    }
+
+    #[test]
+    fn approval_survives_a_later_comment_only_review() {
+        let raw = SAMPLE_JSON.replace(
+            r#""reviewRequests": ["#,
+            r#""reviews": [
+                { "author": { "login": "alice" }, "state": "APPROVED" },
+                { "author": { "login": "alice" }, "state": "COMMENTED" },
+                { "author": { "login": "bob" }, "state": "CHANGES_REQUESTED" },
+                { "author": { "login": "bob" }, "state": "DISMISSED" }
+            ],
+            "reviewRequests": ["#,
+        );
+        let pr = PullRequest::from_json_str(&raw).unwrap();
+        assert_eq!(
+            pr.verdicts,
+            vec![Review {
+                author: "alice".to_string(),
+                state: ReviewState::Approved,
+            }]
+        );
     }
 
     #[test]
