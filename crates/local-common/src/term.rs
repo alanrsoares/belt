@@ -22,8 +22,6 @@ pub const PALETTE: &[&str] = &[
 /// Braille animation spinner frames.
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const EIGHTHS: &[&str] = &["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
-
 static CACHED_COLS: AtomicUsize = AtomicUsize::new(0);
 static CACHED_ROWS: AtomicUsize = AtomicUsize::new(0);
 
@@ -165,24 +163,19 @@ pub fn visible_width(s: &str) -> usize {
     strip_ansi(s).chars().count()
 }
 
-/// Render a fractional horizontal progress meter bar.
+/// Render a horizontal progress meter bar (`▰` filled, `▱` empty).
 pub fn draw_meter(ratio: f64, width: usize, color: &str, reset: &str, gray: &str) -> String {
     let clamped = ratio.clamp(0.0, 1.0);
-    let cells = clamped * (width as f64);
-    let full = cells.floor() as usize;
-    let frac_idx = ((cells - (full as f64)) * 8.0).floor() as usize;
-    let edge = EIGHTHS.get(frac_idx).copied().unwrap_or("");
-    let body = format!("{}{}", "█".repeat(full), edge);
-    let body_width = body.chars().count();
-    let empty = width.saturating_sub(body_width);
+    let filled = ((clamped * (width as f64)).round() as usize).min(width);
+    let empty = width.saturating_sub(filled);
 
     format!(
         "{}{}{}{}{}{}",
         color,
-        body,
+        "▰".repeat(filled),
         reset,
         gray,
-        "░".repeat(empty),
+        "▱".repeat(empty),
         reset
     )
 }
@@ -351,6 +344,210 @@ pub fn file_uri(path: &std::path::Path) -> String {
     uri
 }
 
+fn parse_bool_env(val: &str) -> Option<bool> {
+    match val.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Pure NerdFont detection decision, factored out for unit testing.
+///
+/// Precedence:
+/// 1. Explicit `BELT_NERDFONT` / `NERDFONT` override.
+/// 2. Disabled when not a TTY, `TERM=dumb`, or `CI` is set.
+/// 3. Enabled for terminals with built-in NerdFont symbol fallback (`WezTerm`,
+///    `kitty`, `Ghostty`) or prompts that require NerdFont (`Oh My Posh`,
+///    `Powerlevel9k/10k`).
+pub fn nerdfont_decision(
+    explicit_override: Option<bool>,
+    stream_is_tty: bool,
+    term: Option<&str>,
+    ci: bool,
+    term_program: Option<&str>,
+    has_builtin_nf_env: bool,
+) -> bool {
+    if let Some(force) = explicit_override {
+        return force;
+    }
+    if !stream_is_tty || ci || term == Some("dumb") {
+        return false;
+    }
+    if has_builtin_nf_env {
+        return true;
+    }
+    if matches!(
+        term_program.map(str::to_ascii_lowercase).as_deref(),
+        Some("wezterm" | "ghostty" | "kitty")
+    ) {
+        return true;
+    }
+    matches!(term, Some("xterm-kitty"))
+}
+
+/// Whether NerdFont PUA glyphs should be emitted to `stream`.
+pub fn nerdfont_enabled_for(stream: &impl IsTerminal) -> bool {
+    let explicit = std::env::var("BELT_NERDFONT")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .or_else(|| {
+            std::env::var("NERDFONT")
+                .ok()
+                .and_then(|v| parse_bool_env(&v))
+        });
+    let term = std::env::var("TERM").ok();
+    let ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty());
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let has_builtin_nf_env = [
+        "WEZTERM_EXECUTABLE",
+        "KITTY_WINDOW_ID",
+        "GHOSTTY_RESOURCES_DIR",
+        "POSH_THEME",
+        "POWERLEVEL9K_MODE",
+    ]
+    .iter()
+    .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+
+    nerdfont_decision(
+        explicit,
+        stream.is_terminal(),
+        term.as_deref(),
+        ci,
+        term_program.as_deref(),
+        has_builtin_nf_env,
+    )
+}
+
+/// Terminal glyph set that upgrades cleanly to NerdFont icons when available
+/// and falls back to crisp standard Unicode everywhere else.
+#[derive(Debug, Clone, Copy)]
+pub struct Glyphs {
+    pub nerdfont: bool,
+}
+
+impl Glyphs {
+    pub const fn new(nerdfont: bool) -> Self {
+        Self { nerdfont }
+    }
+
+    pub fn for_stream(stream: &impl IsTerminal) -> Self {
+        Self::new(nerdfont_enabled_for(stream))
+    }
+
+    pub const fn ok(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f00c}" // nf-fa-check
+        } else {
+            "✓"
+        }
+    }
+
+    pub const fn err(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f00d}" // nf-fa-times
+        } else {
+            "✕"
+        }
+    }
+
+    pub const fn warn(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f071}" // nf-fa-warning
+        } else {
+            "⚠"
+        }
+    }
+
+    pub const fn pending(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f017}" // nf-fa-clock_o
+        } else {
+            "◌"
+        }
+    }
+
+    pub const fn cancel(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f05e}" // nf-fa-ban
+        } else {
+            "⊘"
+        }
+    }
+
+    pub const fn timeout(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f254}" // nf-fa-hourglass_end
+        } else {
+            "⏱"
+        }
+    }
+
+    pub const fn comment(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f075}" // nf-fa-comment
+        } else {
+            "💬"
+        }
+    }
+
+    pub const fn pr_open(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f407}" // nf-oct-git_pull_request
+        } else {
+            "●"
+        }
+    }
+
+    pub const fn pr_draft(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f407}" // nf-oct-git_pull_request
+        } else {
+            "◐"
+        }
+    }
+
+    pub const fn pr_merged(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f419}" // nf-oct-git_merge
+        } else {
+            "◆"
+        }
+    }
+
+    pub const fn pr_closed(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f4dc}" // nf-oct-git_pull_request_closed
+        } else {
+            "✕"
+        }
+    }
+
+    pub const fn branch(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f418} " // nf-oct-git_branch
+        } else {
+            ""
+        }
+    }
+
+    pub const fn commit(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f417}" // nf-oct-git_commit
+        } else {
+            "•"
+        }
+    }
+
+    pub const fn file(&self) -> &'static str {
+        if self.nerdfont {
+            "\u{f15b} " // nf-fa-file
+        } else {
+            ""
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +639,90 @@ mod tests {
             file_uri(std::path::Path::new(r"C:\my dir\out.png")),
             "file:///C:/my%20dir/out.png"
         );
+    }
+
+    #[test]
+    fn nerdfont_decision_matrix() {
+        assert!(nerdfont_decision(
+            Some(true),
+            false,
+            Some("dumb"),
+            true,
+            None,
+            false
+        ));
+        assert!(!nerdfont_decision(
+            Some(false),
+            true,
+            None,
+            false,
+            Some("WezTerm"),
+            true
+        ));
+        assert!(!nerdfont_decision(
+            None,
+            false,
+            None,
+            false,
+            Some("WezTerm"),
+            true
+        ));
+        assert!(!nerdfont_decision(
+            None,
+            true,
+            None,
+            true,
+            Some("WezTerm"),
+            true
+        ));
+        assert!(!nerdfont_decision(
+            None,
+            true,
+            Some("dumb"),
+            false,
+            Some("WezTerm"),
+            true
+        ));
+        assert!(nerdfont_decision(
+            None,
+            true,
+            None,
+            false,
+            Some("ghostty"),
+            false
+        ));
+        assert!(nerdfont_decision(
+            None,
+            true,
+            Some("xterm-kitty"),
+            false,
+            None,
+            false
+        ));
+        assert!(nerdfont_decision(None, true, None, false, None, true));
+        assert!(!nerdfont_decision(
+            None,
+            true,
+            None,
+            false,
+            Some("Apple_Terminal"),
+            false
+        ));
+    }
+
+    #[test]
+    fn glyphs_fallback_to_unicode_when_nerdfont_disabled() {
+        let g = Glyphs::new(false);
+        assert_eq!(g.ok(), "✓");
+        assert_eq!(g.err(), "✕");
+        assert_eq!(g.pr_open(), "●");
+        assert_eq!(g.branch(), "");
+    }
+
+    #[test]
+    fn draw_meter_renders_parallelogram_cells() {
+        assert_eq!(draw_meter(0.0, 5, "", "", ""), "▱▱▱▱▱");
+        assert_eq!(draw_meter(0.4, 5, "", "", ""), "▰▰▱▱▱");
+        assert_eq!(draw_meter(1.0, 5, "", "", ""), "▰▰▰▰▰");
     }
 }
