@@ -484,7 +484,7 @@ impl CdpSession {
             if let Some(r) = self.recording.as_mut() {
                 r.cursor_script = id;
             }
-            self.evaluate(CURSOR_JS)?;
+            self.evaluate_top(CURSOR_JS)?;
             let mut params = HashMap::new();
             params.insert("format".to_string(), JsonValue::String("jpeg".to_string()));
             params.insert("quality".to_string(), JsonValue::Number(JPEG_QUALITY));
@@ -514,7 +514,7 @@ impl CdpSession {
     fn end_recording(&mut self) -> Option<Recorder> {
         self.recording.as_ref()?;
         // Frames trail paints; let the last step's repaint reach the socket.
-        let _ = self.evaluate(TWO_FRAMES_JS);
+        let _ = self.evaluate_top(TWO_FRAMES_JS);
         let _ = self.idle(STOP_SETTLE_MS);
         let _ = self.call("Page.stopScreencast", JsonValue::Object(HashMap::new()));
         let Recording {
@@ -529,7 +529,7 @@ impl CdpSession {
                 JsonValue::Object(id),
             );
         }
-        let _ = self.evaluate(
+        let _ = self.evaluate_top(
             "window.__wdCursor && (window.__wdCursor.off = true, window.__wdCursor.remove())",
         );
         Some(recorder)
@@ -561,7 +561,7 @@ impl CdpSession {
             (text.to_string(), until)
         });
         let text = JsonValue::String(text.to_string()).to_json_string();
-        self.evaluate(&format!(
+        self.evaluate_top(&format!(
             r#"(() => {{
   let c = document.getElementById('__wd_caption');
   if (!c) {{
@@ -579,6 +579,15 @@ impl CdpSession {
 }})()"#
         ))?;
         Ok(())
+    }
+
+    /// Evaluate in the top frame whatever `frame` targets: overlays and the
+    /// socket pump belong to the session, not to the frame a script drives.
+    fn evaluate_top(&mut self, expression: &str) -> Result<JsonValue, String> {
+        let saved = self.target_frame.take();
+        let result = self.evaluate(expression);
+        self.target_frame = saved;
+        result
     }
 
     /// A navigation wipes page overlays: show the caption again with its
@@ -614,7 +623,7 @@ impl CdpSession {
     /// buffer. CDP delivers events before the reply to a later command, so a
     /// trivial round-trip is enough to drain them.
     pub fn drain_events(&mut self) -> Result<(), String> {
-        self.evaluate("0")?;
+        self.evaluate_top("0")?;
         Ok(())
     }
 
