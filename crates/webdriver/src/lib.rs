@@ -350,6 +350,9 @@ fn run_step(
             session.click(selector, opts.default_timeout_ms)?;
             Outcome::ok()
         }
+        Step::Upload { selector, path } => {
+            Outcome::with(session.upload(selector, path, opts.default_timeout_ms)?)
+        }
         Step::Hover { selector } => {
             session.hover(selector, opts.default_timeout_ms)?;
             Outcome::ok()
@@ -523,6 +526,7 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Reload { .. } => "reload",
         Step::Click { .. } => "click",
         Step::Hover { .. } => "hover",
+        Step::Upload { .. } => "upload",
         Step::Press { .. } => "press",
         Step::Type { clear: true, .. } => "fill",
         Step::Type { .. } => "type",

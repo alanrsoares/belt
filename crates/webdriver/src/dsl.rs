@@ -53,6 +53,10 @@ pub enum Step {
     Hover {
         selector: String,
     },
+    Upload {
+        selector: String,
+        path: String,
+    },
     Url,
     Title,
     A11y,
@@ -456,6 +460,17 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 });
                 idx += 1;
             }
+            "upload" => {
+                idx += 1;
+                let (Some(selector), Some(path)) = (tokens.get(idx), tokens.get(idx + 1)) else {
+                    return Err("'upload' requires <locator> and <path> arguments".to_string());
+                };
+                steps.push(Step::Upload {
+                    selector: selector.clone(),
+                    path: path.clone(),
+                });
+                idx += 2;
+            }
             "hover" => {
                 idx += 1;
                 let selector = take_locator(tokens, &mut idx)
@@ -653,6 +668,7 @@ fn is_verb(s: &str) -> bool {
             | "press"
             | "key"
             | "hover"
+            | "upload"
             | "url"
             | "title"
             | "a11y"
@@ -1038,6 +1054,14 @@ mod tests {
             ]
         );
         assert!(parse_script("record", 1000).is_err());
+        assert_eq!(
+            parse_script("upload \"#file\" ./a.docx", 1000).unwrap(),
+            vec![Step::Upload {
+                selector: "#file".into(),
+                path: "./a.docx".into()
+            }]
+        );
+        assert!(parse_script("upload #file", 1000).is_err());
         // A verb name is still caption text.
         assert_eq!(
             parse_script("caption close", 1000).unwrap(),

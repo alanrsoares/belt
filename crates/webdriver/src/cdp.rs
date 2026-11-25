@@ -906,6 +906,30 @@ impl CdpSession {
     }
 
     /// Call `function_declaration` with the element handle as `this`.
+    /// `call_on`, returning the result as a handle (`None` for null).
+    fn call_on_handle(
+        &mut self,
+        object_id: &str,
+        function_declaration: &str,
+    ) -> Result<Option<String>, String> {
+        let mut params = HashMap::new();
+        params.insert(
+            "objectId".to_string(),
+            JsonValue::String(object_id.to_string()),
+        );
+        params.insert(
+            "functionDeclaration".to_string(),
+            JsonValue::String(function_declaration.to_string()),
+        );
+        let resp = self.call("Runtime.callFunctionOn", JsonValue::Object(params))?;
+        throw_if_exception(&resp)?;
+        Ok(resp
+            .get("result")
+            .and_then(|r| r.get("objectId"))
+            .and_then(|o| o.as_str())
+            .map(|s| s.to_string()))
+    }
+
     fn call_on(
         &mut self,
         object_id: &str,
@@ -963,6 +987,17 @@ impl CdpSession {
     /// the common case on any app that renders asynchronously — the caller
     /// would otherwise have to hand-write a `wait-for` before every click.
     fn resolve(&mut self, spec: &str, timeout_ms: u64) -> Result<String, String> {
+        self.resolve_with(spec, timeout_ms, true)
+    }
+
+    /// `resolve`, optionally without the visibility check: file inputs are
+    /// usually hidden behind a styled button.
+    fn resolve_with(
+        &mut self,
+        spec: &str,
+        timeout_ms: u64,
+        need_visible: bool,
+    ) -> Result<String, String> {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms);
 
@@ -977,6 +1012,7 @@ impl CdpSession {
             };
 
             match candidate {
+                Ok(Some(object_id)) if !need_visible => return Ok(object_id),
                 Ok(Some(object_id)) => {
                     let visible = self.call_on(
                         &object_id,
@@ -1269,6 +1305,38 @@ impl CdpSession {
         })();
         self.release(&object_id);
         result
+    }
+
+    /// Attach a local file to the file input `spec` names: the input itself,
+    /// one inside it, or its label's control. Fires `input` and `change`.
+    pub fn upload(&mut self, spec: &str, path: &str, timeout_ms: u64) -> Result<String, String> {
+        let file = std::fs::canonicalize(path)
+            .map_err(|e| format!("cannot read upload file '{path}': {e}"))?;
+        if !file.is_file() {
+            return Err(format!("upload path '{path}' is not a file"));
+        }
+        let found = self.resolve_with(spec, timeout_ms, false)?;
+        let input = self.call_on_handle(
+            &found,
+            r#"function() {
+                const isFile = (e) => e && e.matches && e.matches('input[type=file]');
+                return [this, this.querySelector && this.querySelector('input[type=file]'), this.control]
+                    .find(isFile) || null;
+            }"#,
+        );
+        self.release(&found);
+        let input =
+            input?.ok_or_else(|| format!("'{spec}' is not or does not contain a file input"))?;
+
+        let mut params = HashMap::new();
+        params.insert(
+            "files".to_string(),
+            JsonValue::Array(vec![JsonValue::String(file.display().to_string())]),
+        );
+        params.insert("objectId".to_string(), JsonValue::String(input.clone()));
+        let result = self.call("DOM.setFileInputFiles", JsonValue::Object(params));
+        self.release(&input);
+        result.map(|_| file.display().to_string())
     }
 
     /// Set a form field's value using real editing input.

@@ -225,6 +225,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} <duration>                Fixed sleep (e.g. 500ms, 2s, 1m)
     {} <locator>                Click element
     {} <locator>                Real mouse move, so CSS :hover applies
+    {} <loc> <path>            Attach a local file to a file input (hidden is fine)
     {} <key>                    Key chord, e.g. Enter, Escape, Meta+O
     {} <loc> <text>              Append text (fires React onChange)
     {} <loc> <text>              Clear then type
@@ -282,6 +283,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
         c.yellow("wait"),
         c.yellow("click"),
         c.yellow("hover"),
+        c.yellow("upload"),
         c.yellow("press"),
         c.yellow("type"),
         c.yellow("fill"),

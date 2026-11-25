@@ -51,6 +51,7 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 - `wait <duration>` — Fixed sleep (`500ms`, `2s`, `1m`).
 - `click <loc>` — Click the element.
 - `hover <loc>` — Real mouse move, so CSS `:hover` applies.
+- `upload <loc> <path>` — Attach a local file without opening the OS picker. The locator may name the file input (hidden is fine), an element that contains one, or its `<label>`. Fires `input` and `change`.
 - `press <key>` — Key chord: `Enter`, `Escape`, `Meta+O`.
 - `type <loc> <text>` — Append text.
 - `fill <loc> <text>` — Clear, then type.
