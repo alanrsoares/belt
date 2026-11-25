@@ -7,6 +7,7 @@ pub mod cli;
 pub mod dsl;
 pub mod json;
 pub mod locator;
+pub mod record;
 
 use browser::BrowserInstance;
 use cdp::{CdpSession, ConsoleEntry};
@@ -160,10 +161,12 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
     ) {
         Ok(Flow::Continue) => {}
         Ok(Flow::Stop) => {
+            failures += finish_recording(&mut session, out, &c);
             instance.shutdown(&mut session);
             return Ok(finish(failures, opts, overall_start, out, &c));
         }
         Err(e) => {
+            let _ = finish_recording(&mut session, out, &c);
             instance.shutdown(&mut session);
             return Err(e);
         }
@@ -225,6 +228,7 @@ pub fn execute(opts: &CliOptions, out: &mut impl Write) -> Result<i32, String> {
         }
     }
 
+    failures += finish_recording(&mut session, out, &c);
     instance.shutdown(&mut session);
     Ok(finish(failures, opts, overall_start, out, &c))
 }
@@ -329,7 +333,16 @@ fn run_step(
             Outcome::ok()
         }
         Step::Wait { duration_ms } => {
-            std::thread::sleep(std::time::Duration::from_millis(*duration_ms));
+            session.idle(*duration_ms)?;
+            Outcome::ok()
+        }
+        Step::Record { path: Some(path) } => {
+            session.start_recording(path)?;
+            Outcome::with(format!("recording to {path}"))
+        }
+        Step::Record { path: None } => recording_outcome(session.stop_recording()?, c),
+        Step::Caption { text, duration_ms } => {
+            session.caption(text, *duration_ms)?;
             Outcome::ok()
         }
         Step::Reload { timeout_ms } => Outcome::with(session.reload(*timeout_ms)?),
@@ -468,10 +481,7 @@ fn run_step(
     // pure noise once a caller trusts the non-zero exit code.
     let silent = opts.quiet && matches!(outcome.status, Status::Ok) && outcome.detail.is_none();
     if !silent {
-        let word = match outcome.status {
-            Status::Ok => c.green("ok"),
-            Status::Warn => c.yellow("warn"),
-        };
+        let word = status_word(&outcome.status, c);
         let prefix = if opts.verbose {
             format!("[{step_num}] {} ", verb_of(step))
         } else {
@@ -508,6 +518,8 @@ fn verb_of(step: &Step) -> &'static str {
         Step::WaitForUrl { .. } => "wait-for-url",
         Step::WaitForHydration { .. } => "wait-for-hydration",
         Step::Wait { .. } => "wait",
+        Step::Record { .. } => "record",
+        Step::Caption { .. } => "caption",
         Step::Reload { .. } => "reload",
         Step::Click { .. } => "click",
         Step::Hover { .. } => "hover",
@@ -528,6 +540,44 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Pdf { .. } => "pdf",
         Step::Html { .. } => "html",
         Step::Close => "close",
+    }
+}
+
+fn recording_outcome(done: record::Finished, c: &Colour) -> Outcome {
+    if done.encoded {
+        Outcome::with(linked(c, &done.path))
+    } else {
+        Outcome::warn(format!(
+            "frames + frames.ffconcat in {} (no ffmpeg, or not a .mp4/.mov/.webm/.gif/.mkv path)",
+            linked(c, &done.path)
+        ))
+    }
+}
+
+fn status_word(status: &Status, c: &Colour) -> String {
+    match status {
+        Status::Ok => c.green("ok"),
+        Status::Warn => c.yellow("warn"),
+    }
+}
+
+/// A script that ends mid-recording still gets its video. Returns the
+/// failures to add, so a failed encode fails the run's exit code.
+fn finish_recording(session: &mut CdpSession, out: &mut impl Write, c: &Colour) -> usize {
+    if !session.is_recording() {
+        return 0;
+    }
+    match session.stop_recording() {
+        Ok(done) => {
+            let o = recording_outcome(done, c);
+            let word = status_word(&o.status, c);
+            let _ = writeln!(out, "{word} record {}", o.detail.unwrap_or_default());
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(out, "{} record {e}", c.red("err"));
+            1
+        }
     }
 }
 

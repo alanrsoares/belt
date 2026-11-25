@@ -240,6 +240,8 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
     {} [path]                     Print page to PDF
     {} [path]                    Dump current HTML to file or stdout
+    {} <path> | stop            Screencast via ffmpeg (.mp4/.mov/.webm/.gif), with cursor and paced input
+    {} [text] [duration]       Overlay caption, kept until the next one unless timed; bare clears
     {}                          End the run (useful in --repl)
 
 {}
@@ -296,6 +298,8 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
         c.yellow("screenshot"),
         c.yellow("pdf"),
         c.yellow("html"),
+        c.yellow("record"),
+        c.yellow("caption"),
         c.yellow("close"),
         c.bold("OPTIONS:"),
     );

@@ -3,6 +3,7 @@
 use crate::base64;
 use crate::json::{self, JsonValue};
 use crate::locator;
+use crate::record::{Finished, Recorder};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -307,6 +308,50 @@ pub struct CdpSession {
     inflight: HashMap<String, Instant>,
     dialog_accept: bool,
     dialog_text: Option<String>,
+    /// Active `record`, plus the id of its injected cursor script.
+    recording: Option<Recording>,
+    /// Last mouse position, so a recorded move can glide from it.
+    mouse: (f64, f64),
+}
+
+/// Fake pointer for recordings: headless Chrome draws none. It follows real
+/// (CDP-dispatched) mouse events, so nothing else needs to drive it.
+const CURSOR_JS: &str = r#"(() => {
+  if (window.__wdCursor) { window.__wdCursor.off = false; return; }
+  const d = document.createElement('div');
+  window.__wdCursor = d;
+  d.dataset.wdOverlay = '';
+  d.style.cssText = 'position:fixed;left:-50px;top:-50px;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:rgba(0,0,0,.35);border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.5);pointer-events:none;z-index:2147483647;transition:transform .1s';
+  const at = (e) => {
+    if (d.off) return;
+    if (!d.isConnected) (document.body || document.documentElement).appendChild(d);
+    d.style.left = e.clientX + 'px'; d.style.top = e.clientY + 'px';
+  };
+  addEventListener('mousemove', at, true);
+  addEventListener('mousedown', (e) => { at(e); d.style.transform = 'scale(.7)'; }, true);
+  addEventListener('mouseup', () => { d.style.transform = ''; }, true);
+})()"#;
+
+/// Resolves after two animation frames, i.e. once the last change painted.
+const TWO_FRAMES_JS: &str =
+    "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))";
+
+/// Steps in a recorded mouse glide, and the pause between them.
+const GLIDE_STEPS: u32 = 20;
+const GLIDE_STEP_MS: u64 = 16;
+/// Per-character delay when typing during a recording.
+const TYPE_DELAY_MS: u64 = 45;
+/// Pause before a recorded click, so the viewer sees the cursor land.
+const PRESS_BEAT_MS: u64 = 120;
+/// Pump time before `stopScreencast`, so the final repaint's frame arrives.
+const STOP_SETTLE_MS: u64 = 100;
+/// Screencast JPEG quality (0-100).
+const JPEG_QUALITY: f64 = 85.0;
+
+/// An active `record`: frames on disk plus the injected cursor script's id.
+struct Recording {
+    recorder: Recorder,
+    cursor_script: String,
 }
 
 impl CdpSession {
@@ -325,6 +370,8 @@ impl CdpSession {
             inflight: HashMap::new(),
             dialog_accept: true,
             dialog_text: None,
+            recording: None,
+            mouse: (0.0, 0.0),
         }
     }
 
@@ -367,17 +414,162 @@ impl CdpSession {
             .clone()
             .unwrap_or_else(|| text("defaultPrompt"));
         reply.insert("promptText".to_string(), JsonValue::String(prompt));
+        self.send_nowait("Page.handleJavaScriptDialog", JsonValue::Object(reply))
+    }
+
+    /// Send a command from inside the read loop. The reply carries an id
+    /// nobody waits for; `call` skips unknown ids.
+    fn send_nowait(&mut self, method: &str, params: JsonValue) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
         let mut req = HashMap::new();
         req.insert("id".to_string(), JsonValue::Number(id as f64));
-        req.insert(
-            "method".to_string(),
-            JsonValue::String("Page.handleJavaScriptDialog".to_string()),
-        );
-        req.insert("params".to_string(), JsonValue::Object(reply));
-        // The reply carries an id nobody waits for; `call` skips unknown ids.
+        req.insert("method".to_string(), JsonValue::String(method.to_string()));
+        req.insert("params".to_string(), params);
         self.ws.send_text(&JsonValue::Object(req).to_json_string())
+    }
+
+    /// Save a screencast frame and ack it; Chrome sends no more until acked.
+    fn take_frame(&mut self, params: Option<&JsonValue>) -> Result<(), String> {
+        let Some(p) = params else { return Ok(()) };
+        if let Some(session_id) = p.get("sessionId").cloned() {
+            let mut ack = HashMap::new();
+            ack.insert("sessionId".to_string(), session_id);
+            self.send_nowait("Page.screencastFrameAck", JsonValue::Object(ack))?;
+        }
+        let Some(Recording { recorder, .. }) = self.recording.as_mut() else {
+            return Ok(());
+        };
+        let data = p.get("data").and_then(|d| d.as_str());
+        let ts = p
+            .get("metadata")
+            .and_then(|m| m.get("timestamp"))
+            .and_then(|t| t.as_f64());
+        // A frame without pixels or a time cannot be placed; skip it.
+        let (Some(data), Some(ts)) = (data, ts) else {
+            return Ok(());
+        };
+        let jpeg = base64::decode(data).map_err(|e| format!("bad screencast frame: {e}"))?;
+        recorder.add(ts, &jpeg)
+    }
+
+    pub fn start_recording(&mut self, path: &str) -> Result<(), String> {
+        if self.is_recording() {
+            return Err("already recording; run 'record stop' first".to_string());
+        }
+        self.recording = Some(Recording {
+            recorder: Recorder::start(path)?,
+            cursor_script: String::new(),
+        });
+        let started = (|| -> Result<(), String> {
+            let mut src = HashMap::new();
+            src.insert(
+                "source".to_string(),
+                JsonValue::String(CURSOR_JS.to_string()),
+            );
+            let id = self
+                .call(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    JsonValue::Object(src),
+                )?
+                .get("identifier")
+                .and_then(|i| i.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if let Some(r) = self.recording.as_mut() {
+                r.cursor_script = id;
+            }
+            self.evaluate(CURSOR_JS)?;
+            let mut params = HashMap::new();
+            params.insert("format".to_string(), JsonValue::String("jpeg".to_string()));
+            params.insert("quality".to_string(), JsonValue::Number(JPEG_QUALITY));
+            self.call("Page.startScreencast", JsonValue::Object(params))?;
+            Ok(())
+        })();
+        if started.is_err() {
+            if let Some(r) = self.end_recording() {
+                r.discard();
+            }
+        }
+        started
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    pub fn stop_recording(&mut self) -> Result<Finished, String> {
+        self.end_recording()
+            .ok_or_else(|| "not recording; start with 'record <path>'".to_string())?
+            .finish()
+    }
+
+    /// Stop the screencast and remove the cursor. The recorder stays attached
+    /// until `stopScreencast` returns, so frames still in the socket are kept.
+    fn end_recording(&mut self) -> Option<Recorder> {
+        self.recording.as_ref()?;
+        // Frames trail paints; let the last step's repaint reach the socket.
+        let _ = self.evaluate(TWO_FRAMES_JS);
+        let _ = self.idle(STOP_SETTLE_MS);
+        let _ = self.call("Page.stopScreencast", JsonValue::Object(HashMap::new()));
+        let Recording {
+            recorder,
+            cursor_script,
+        } = self.recording.take()?;
+        if !cursor_script.is_empty() {
+            let mut id = HashMap::new();
+            id.insert("identifier".to_string(), JsonValue::String(cursor_script));
+            let _ = self.call(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                JsonValue::Object(id),
+            );
+        }
+        let _ = self.evaluate(
+            "window.__wdCursor && (window.__wdCursor.off = true, window.__wdCursor.remove())",
+        );
+        Some(recorder)
+    }
+
+    /// Sleep that keeps reading the socket, so screencast frames keep flowing
+    /// and get acked while the script waits.
+    pub fn idle(&mut self, ms: u64) -> Result<(), String> {
+        let end = Instant::now() + Duration::from_millis(ms);
+        loop {
+            if self.is_recording() {
+                // A page mid-navigation has no context to evaluate in; the
+                // next pump or step catches a real socket failure.
+                let _ = self.drain_events();
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(());
+            }
+            std::thread::sleep(left.min(Duration::from_millis(20)));
+        }
+    }
+
+    /// Show `text` as a bottom-centre caption; `ms == 0` keeps it up until
+    /// the next caption. It lives in the page, so the screencast captures it.
+    pub fn caption(&mut self, text: &str, ms: u64) -> Result<(), String> {
+        let text = JsonValue::String(text.to_string()).to_json_string();
+        self.evaluate(&format!(
+            r#"(() => {{
+  let c = document.getElementById('__wd_caption');
+  if (!c) {{
+    c = document.createElement('div');
+    c.id = '__wd_caption';
+    c.dataset.wdOverlay = '';
+    c.setAttribute('aria-hidden', 'true');
+    c.style.cssText = 'position:fixed;left:50%;bottom:6%;transform:translateX(-50%);max-width:80vw;padding:.6em 1.1em;border-radius:.5em;background:rgba(0,0,0,.78);color:#fff;font:600 22px/1.35 system-ui,sans-serif;text-align:center;pointer-events:none;z-index:2147483647';
+    (document.body || document.documentElement).appendChild(c);
+  }}
+  c.textContent = {text};
+  c.hidden = !c.textContent;
+  clearTimeout(window.__wdCaptionTimer);
+  if ({ms} > 0) window.__wdCaptionTimer = setTimeout(() => {{ c.hidden = true; }}, {ms});
+}})()"#
+        ))?;
+        Ok(())
     }
 
     pub fn set_default_timeout(&mut self, timeout_ms: u64) {
@@ -542,8 +734,10 @@ impl CdpSession {
             let msg = self.ws.read_text()?;
             let val = json::parse(&msg)?;
             self.record_event(&val);
-            if val.get("method").and_then(|m| m.as_str()) == Some("Page.javascriptDialogOpening") {
-                self.accept_dialog(val.get("params"))?;
+            match val.get("method").and_then(|m| m.as_str()) {
+                Some("Page.javascriptDialogOpening") => self.accept_dialog(val.get("params"))?,
+                Some("Page.screencastFrame") => self.take_frame(val.get("params"))?,
+                _ => {}
             }
 
             if let Some(id_val) = val.get("id") {
@@ -854,7 +1048,27 @@ impl CdpSession {
         Ok((x, y))
     }
 
+    /// While recording, moves glide from the last position and presses get a
+    /// short beat first, so a viewer can follow the pointer.
     fn mouse_event(&mut self, kind: &str, x: f64, y: f64, clicks: f64) -> Result<(), String> {
+        if self.is_recording() {
+            if kind == "mouseMoved" {
+                let (x0, y0) = self.mouse;
+                for i in 1..GLIDE_STEPS {
+                    let t = f64::from(i) / f64::from(GLIDE_STEPS);
+                    let e = t * t * (3.0 - 2.0 * t); // smoothstep
+                    self.dispatch_mouse(kind, x0 + (x - x0) * e, y0 + (y - y0) * e, 0.0)?;
+                    self.idle(GLIDE_STEP_MS)?;
+                }
+            } else if kind == "mousePressed" {
+                self.idle(PRESS_BEAT_MS)?;
+            }
+        }
+        self.mouse = (x, y);
+        self.dispatch_mouse(kind, x, y, clicks)
+    }
+
+    fn dispatch_mouse(&mut self, kind: &str, x: f64, y: f64, clicks: f64) -> Result<(), String> {
         let mut params = HashMap::new();
         params.insert("type".to_string(), JsonValue::String(kind.to_string()));
         params.insert("x".to_string(), JsonValue::Number(x));
@@ -874,9 +1088,7 @@ impl CdpSession {
     pub fn wait_for(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
         let object_id = self.resolve(spec, timeout_ms)?;
         self.release(&object_id);
-        self.evaluate(
-            "new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))",
-        )?;
+        self.evaluate(TWO_FRAMES_JS)?;
         Ok(())
     }
 
@@ -1077,9 +1289,20 @@ impl CdpSession {
                 return Ok(());
             }
 
-            let mut params = HashMap::new();
-            params.insert("text".to_string(), JsonValue::String(text.to_string()));
-            self.call("Input.insertText", JsonValue::Object(params))?;
+            // Recording types one character at a time so the video shows it.
+            let chunks: Vec<String> = if self.is_recording() {
+                text.chars().map(String::from).collect()
+            } else {
+                vec![text.to_string()]
+            };
+            for chunk in chunks {
+                let mut params = HashMap::new();
+                params.insert("text".to_string(), JsonValue::String(chunk));
+                self.call("Input.insertText", JsonValue::Object(params))?;
+                if self.is_recording() {
+                    self.idle(TYPE_DELAY_MS)?;
+                }
+            }
             Ok(())
         })();
 

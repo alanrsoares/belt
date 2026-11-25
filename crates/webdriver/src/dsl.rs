@@ -75,6 +75,15 @@ pub enum Step {
     Console {
         mode: ConsoleMode,
     },
+    /// Start a screencast to `path`, or stop it when `None`.
+    Record {
+        path: Option<String>,
+    },
+    /// Overlay caption; `duration_ms == 0` keeps it until the next caption.
+    Caption {
+        text: String,
+        duration_ms: u64,
+    },
     Close,
 }
 
@@ -293,6 +302,29 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 let duration_ms = parse_duration_ms(&tokens[idx])?;
                 steps.push(Step::Wait { duration_ms });
                 idx += 1;
+            }
+            "record" => {
+                idx += 1;
+                let path = match tokens.get(idx) {
+                    Some(t) if t == "stop" => None,
+                    Some(t) if !is_verb(t) => Some(t.clone()),
+                    _ => return Err("'record' requires <path> or 'stop'".to_string()),
+                };
+                idx += 1;
+                steps.push(Step::Record { path });
+            }
+            "caption" => {
+                idx += 1;
+                // Always takes the next argument as text, so `caption close`
+                // shows "close". Bare `caption` clears: the tokenizer drops `""`.
+                let text = tokens.get(idx).cloned().unwrap_or_default();
+                idx += 1;
+                let mut duration_ms = 0;
+                if let Some(d) = tokens.get(idx).and_then(|t| parse_duration_ms(t).ok()) {
+                    duration_ms = d;
+                    idx += 1;
+                }
+                steps.push(Step::Caption { text, duration_ms });
             }
             "click" => {
                 idx += 1;
@@ -631,6 +663,8 @@ fn is_verb(s: &str) -> bool {
             | "snapshot"
             | "aria"
             | "frame"
+            | "record"
+            | "caption"
             | "close"
             | "quit"
             | "exit"
@@ -976,6 +1010,48 @@ mod tests {
         assert_eq!(
             tokenize_line(r"eval foo\").unwrap(),
             vec!["eval".to_string(), r"foo\".to_string()]
+        );
+    }
+
+    #[test]
+    fn record_and_caption_parse() {
+        let steps = parse_script(
+            "record demo.mp4\ncaption \"Sign in\" 2s\ncaption hi\nrecord stop",
+            1000,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                Step::Record {
+                    path: Some("demo.mp4".into())
+                },
+                Step::Caption {
+                    text: "Sign in".into(),
+                    duration_ms: 2000
+                },
+                Step::Caption {
+                    text: "hi".into(),
+                    duration_ms: 0
+                },
+                Step::Record { path: None },
+            ]
+        );
+        assert!(parse_script("record", 1000).is_err());
+        // A verb name is still caption text.
+        assert_eq!(
+            parse_script("caption close", 1000).unwrap(),
+            vec![Step::Caption {
+                text: "close".into(),
+                duration_ms: 0
+            }]
+        );
+        assert_eq!(
+            parse_script("caption", 1000).unwrap(),
+            vec![Step::Caption {
+                text: String::new(),
+                duration_ms: 0
+            }]
         );
     }
 }

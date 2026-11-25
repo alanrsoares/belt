@@ -43,11 +43,12 @@ pub const PRELUDE: &str = r#"window.__wd = window.__wd || {
       header: 'banner', footer: 'contentinfo', summary: 'button'
     }[tag] || null;
   },
+  // `data-wd-overlay` marks the recording cursor and captions, never targets.
   find(spec) {
     if (spec.startsWith('text=')) {
       const want = spec.slice(5).trim().toLowerCase();
       const hits = Array.prototype.filter.call(
-        document.querySelectorAll('body *'),
+        document.querySelectorAll('body *:not([data-wd-overlay])'),
         (e) => (e.textContent || '').trim().toLowerCase().includes(want)
       );
       // Innermost match wins, so a wrapper div never shadows its own button.
@@ -59,7 +60,7 @@ pub const PRELUDE: &str = r#"window.__wd = window.__wd || {
       const role = (sep < 0 ? rest : rest.slice(0, sep)).trim();
       const want = sep < 0 ? null : rest.slice(sep + 1).trim().toLowerCase();
       return Array.prototype.find.call(
-        document.querySelectorAll('body *'),
+        document.querySelectorAll('body *:not([data-wd-overlay])'),
         (e) => window.__wd.role(e) === role && (want === null || window.__wd.name(e).includes(want))
       ) || null;
     }
