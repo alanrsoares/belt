@@ -18,9 +18,15 @@ pub const PRELUDE: &str = r#"window.__wd = window.__wd || {
     const s = getComputedStyle(el);
     return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;
   },
+  // Labels come before `value`, so a filled field still matches its label.
   name(el) {
-    const v = el.getAttribute('aria-label') || el.getAttribute('title') ||
-      el.getAttribute('alt') || el.value || el.textContent || '';
+    const text = (e) => ((e && e.textContent) || '').trim();
+    const join = (els) => els.map(text).filter(Boolean).join(' ');
+    const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    const v = el.getAttribute('aria-label') ||
+      join(ids.map((id) => document.getElementById(id))) ||
+      join(Array.from(el.labels || [])) ||
+      el.getAttribute('title') || el.getAttribute('alt') || el.value || el.textContent || '';
     return String(v).trim().toLowerCase();
   },
   role(el) {
