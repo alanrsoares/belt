@@ -18,6 +18,8 @@ pub struct Recorder {
     out: String,
     dir: PathBuf,
     stamps: Vec<f64>,
+    /// First frame that could not be stored; `finish` reports it.
+    error: Option<String>,
 }
 
 /// How a recording ended: the file or frames directory, and whether it fell
@@ -38,14 +40,23 @@ impl Recorder {
             out: out.to_string(),
             dir,
             stamps: Vec::new(),
+            error: None,
         })
     }
 
-    pub fn add(&mut self, timestamp: f64, jpeg: &[u8]) -> Result<(), String> {
+    /// Store a frame. A failure is kept for `finish` rather than returned,
+    /// because frames arrive inside unrelated commands that must not fail.
+    pub fn add(&mut self, timestamp: f64, jpeg: Result<Vec<u8>, String>) {
         let path = self.dir.join(frame_name(self.stamps.len()));
-        fs::write(&path, jpeg).map_err(|e| format!("failed to write '{}': {e}", path.display()))?;
-        self.stamps.push(timestamp);
-        Ok(())
+        let stored = jpeg.and_then(|jpeg| {
+            fs::write(&path, jpeg).map_err(|e| format!("failed to write '{}': {e}", path.display()))
+        });
+        match stored {
+            Ok(()) => self.stamps.push(timestamp),
+            Err(e) => {
+                self.error.get_or_insert(e);
+            }
+        }
     }
 
     /// Drop a recording that never started.
@@ -54,6 +65,12 @@ impl Recorder {
     }
 
     pub fn finish(self) -> Result<Finished, String> {
+        if let Some(e) = self.error {
+            return Err(format!(
+                "recording dropped a frame (frames kept in '{}'): {e}",
+                self.dir.display()
+            ));
+        }
         if self.stamps.is_empty() {
             let _ = fs::remove_dir_all(&self.dir);
             return Err("recording captured no frames".to_string());
@@ -181,6 +198,18 @@ fn concat_list(stamps: &[f64], end: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finish_reports_a_frame_that_failed_to_store() {
+        let out = std::env::temp_dir().join(format!("wd-rec-err-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(out.to_str().unwrap()).unwrap();
+        rec.add(1.0, Ok(vec![0xff]));
+        rec.add(2.0, Err("bad screencast frame: x".to_string()));
+        rec.add(3.0, Ok(vec![0xff]));
+        let err = rec.finish().err().expect("finish must fail");
+        assert!(err.contains("bad screencast frame: x"), "{err}");
+        let _ = fs::remove_dir_all(format!("{}.frames", out.display()));
+    }
 
     #[test]
     fn concat_list_times_each_frame_until_the_next() {

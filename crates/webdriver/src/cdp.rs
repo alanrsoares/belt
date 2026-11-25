@@ -453,8 +453,9 @@ impl CdpSession {
         let (Some(data), Some(ts)) = (data, ts) else {
             return Ok(());
         };
-        let jpeg = base64::decode(data).map_err(|e| format!("bad screencast frame: {e}"))?;
-        recorder.add(ts, &jpeg)
+        let jpeg = base64::decode(data).map_err(|e| format!("bad screencast frame: {e}"));
+        recorder.add(ts, jpeg);
+        Ok(())
     }
 
     pub fn start_recording(&mut self, path: &str) -> Result<(), String> {
@@ -1108,21 +1109,32 @@ impl CdpSession {
         Ok((x, y))
     }
 
-    /// While recording, moves glide from the last position and presses get a
-    /// short beat first, so a viewer can follow the pointer.
+    /// Move to the element and click it. The glide and press beat can take
+    /// ~0.5s while recording, so the press re-measures the element first.
+    fn click_object(&mut self, object_id: &str) -> Result<(), String> {
+        let (x, y) = self.centre_of(object_id)?;
+        self.mouse_event("mouseMoved", x, y, 0.0)?;
+        let (x, y) = if self.is_recording() {
+            self.idle(PRESS_BEAT_MS)?;
+            self.centre_of(object_id)?
+        } else {
+            (x, y)
+        };
+        self.mouse_event("mousePressed", x, y, 1.0)?;
+        self.mouse_event("mouseReleased", x, y, 1.0)
+    }
+
+    /// While recording, moves glide from the last position, so a viewer can
+    /// follow the pointer.
     fn mouse_event(&mut self, kind: &str, x: f64, y: f64, clicks: f64) -> Result<(), String> {
-        if self.is_recording() {
-            if kind == "mouseMoved" {
-                // The first move has no origin to glide from; it just lands.
-                let (x0, y0) = self.mouse.unwrap_or((x, y));
-                for i in 1..GLIDE_STEPS {
-                    let t = f64::from(i) / f64::from(GLIDE_STEPS);
-                    let e = t * t * (3.0 - 2.0 * t); // smoothstep
-                    self.dispatch_mouse(kind, x0 + (x - x0) * e, y0 + (y - y0) * e, 0.0)?;
-                    self.idle(GLIDE_STEP_MS)?;
-                }
-            } else if kind == "mousePressed" {
-                self.idle(PRESS_BEAT_MS)?;
+        if self.is_recording() && kind == "mouseMoved" {
+            // The first move has no origin to glide from; it just lands.
+            let (x0, y0) = self.mouse.unwrap_or((x, y));
+            for i in 1..GLIDE_STEPS {
+                let t = f64::from(i) / f64::from(GLIDE_STEPS);
+                let e = t * t * (3.0 - 2.0 * t); // smoothstep
+                self.dispatch_mouse(kind, x0 + (x - x0) * e, y0 + (y - y0) * e, 0.0)?;
+                self.idle(GLIDE_STEP_MS)?;
             }
         }
         self.mouse = Some((x, y));
@@ -1287,12 +1299,7 @@ impl CdpSession {
     /// that listen for pointer events behave as they do for a person.
     pub fn click(&mut self, spec: &str, timeout_ms: u64) -> Result<(), String> {
         let object_id = self.resolve(spec, timeout_ms)?;
-        let result = (|| -> Result<(), String> {
-            let (x, y) = self.centre_of(&object_id)?;
-            self.mouse_event("mouseMoved", x, y, 0.0)?;
-            self.mouse_event("mousePressed", x, y, 1.0)?;
-            self.mouse_event("mouseReleased", x, y, 1.0)
-        })();
+        let result = self.click_object(&object_id);
         self.release(&object_id);
         result
     }
@@ -1354,10 +1361,7 @@ impl CdpSession {
         let object_id = self.resolve(spec, timeout_ms)?;
 
         let result = (|| -> Result<(), String> {
-            let (x, y) = self.centre_of(&object_id)?;
-            self.mouse_event("mouseMoved", x, y, 0.0)?;
-            self.mouse_event("mousePressed", x, y, 1.0)?;
-            self.mouse_event("mouseReleased", x, y, 1.0)?;
+            self.click_object(&object_id)?;
 
             self.call_on(
                 &object_id,
