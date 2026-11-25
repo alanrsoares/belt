@@ -311,7 +311,10 @@ pub struct CdpSession {
     /// Active `record`, plus the id of its injected cursor script.
     recording: Option<Recording>,
     /// Last mouse position, so a recorded move can glide from it.
-    mouse: (f64, f64),
+    mouse: Option<(f64, f64)>,
+    /// Current caption and when it expires (`None`: until replaced), so it
+    /// can be shown again after a navigation wipes the page.
+    caption: Option<(String, Option<Instant>)>,
 }
 
 /// Fake pointer for recordings: headless Chrome draws none. It follows real
@@ -371,7 +374,8 @@ impl CdpSession {
             dialog_accept: true,
             dialog_text: None,
             recording: None,
-            mouse: (0.0, 0.0),
+            mouse: None,
+            caption: None,
         }
     }
 
@@ -551,6 +555,10 @@ impl CdpSession {
     /// Show `text` as a bottom-centre caption; `ms == 0` keeps it up until
     /// the next caption. It lives in the page, so the screencast captures it.
     pub fn caption(&mut self, text: &str, ms: u64) -> Result<(), String> {
+        self.caption = (!text.is_empty()).then(|| {
+            let until = (ms > 0).then(|| Instant::now() + Duration::from_millis(ms));
+            (text.to_string(), until)
+        });
         let text = JsonValue::String(text.to_string()).to_json_string();
         self.evaluate(&format!(
             r#"(() => {{
@@ -569,6 +577,22 @@ impl CdpSession {
   if ({ms} > 0) window.__wdCaptionTimer = setTimeout(() => {{ c.hidden = true; }}, {ms});
 }})()"#
         ))?;
+        Ok(())
+    }
+
+    /// A navigation wipes page overlays: show the caption again with its
+    /// remaining time, and while recording put the cursor back where it was.
+    fn restore_overlays(&mut self) -> Result<(), String> {
+        if let Some((text, until)) = self.caption.clone() {
+            match until.map(|t| t.saturating_duration_since(Instant::now()).as_millis() as u64) {
+                // Expired: a 0 would mean "keep until replaced".
+                Some(0) => self.caption = None,
+                left => self.caption(&text, left.unwrap_or(0))?,
+            }
+        }
+        if let (true, Some((x, y))) = (self.is_recording(), self.mouse) {
+            self.dispatch_mouse("mouseMoved", x, y, 0.0)?;
+        }
         Ok(())
     }
 
@@ -775,7 +799,7 @@ impl CdpSession {
         self.call("Page.navigate", JsonValue::Object(params))?;
 
         self.await_ready(timeout_ms);
-        Ok(())
+        self.restore_overlays()
     }
 
     /// Poll `document.readyState` until the document is usable. Returns whether
@@ -790,7 +814,7 @@ impl CdpSession {
                     return true;
                 }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let _ = self.idle(50);
         }
 
         false
@@ -978,7 +1002,7 @@ impl CdpSession {
             if start.elapsed() >= timeout {
                 return Err(format!("{reason} after {timeout_ms}ms"));
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let _ = self.idle(50);
         }
     }
 
@@ -1053,7 +1077,8 @@ impl CdpSession {
     fn mouse_event(&mut self, kind: &str, x: f64, y: f64, clicks: f64) -> Result<(), String> {
         if self.is_recording() {
             if kind == "mouseMoved" {
-                let (x0, y0) = self.mouse;
+                // The first move has no origin to glide from; it just lands.
+                let (x0, y0) = self.mouse.unwrap_or((x, y));
                 for i in 1..GLIDE_STEPS {
                     let t = f64::from(i) / f64::from(GLIDE_STEPS);
                     let e = t * t * (3.0 - 2.0 * t); // smoothstep
@@ -1064,7 +1089,7 @@ impl CdpSession {
                 self.idle(PRESS_BEAT_MS)?;
             }
         }
-        self.mouse = (x, y);
+        self.mouse = Some((x, y));
         self.dispatch_mouse(kind, x, y, clicks)
     }
 
@@ -1103,7 +1128,7 @@ impl CdpSession {
                     return Ok(url);
                 }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            let _ = self.idle(50);
         }
 
         Err(format!(
@@ -1163,6 +1188,7 @@ impl CdpSession {
     pub fn reload(&mut self, timeout_ms: u64) -> Result<String, String> {
         self.call("Page.reload", JsonValue::Object(HashMap::new()))?;
         self.await_ready(timeout_ms);
+        self.restore_overlays()?;
         self.current_url()
     }
 
