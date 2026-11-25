@@ -6,6 +6,7 @@ use webdriver::browser::{find_browser, BrowserInstance};
 const PAGE: &str = "data:text/html,<dialog open>\
 <label for='book'>Book name</label><input id='book' value='Dune'>\
 <span id='mail'>Email address</span><input aria-labelledby='mail'>\
+<label for='ship'>Ship%0A  name</label><input id='ship' value='Ship name'>\
 </dialog>";
 
 #[test]
@@ -20,5 +21,7 @@ fn role_matches_inputs_by_label_for_and_aria_labelledby() {
     // The first field is filled: its value must not hide its label.
     cdp.wait_for("role=textbox:Book name", 2_000).unwrap();
     cdp.wait_for("role=textbox:Email address", 2_000).unwrap();
+    // A line break in the label still matches a single space.
+    cdp.wait_for("role=textbox:Ship name", 2_000).unwrap();
     assert!(cdp.wait_for("role=textbox:Password", 500).is_err());
 }

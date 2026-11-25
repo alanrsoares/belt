@@ -27,7 +27,8 @@ pub const PRELUDE: &str = r#"window.__wd = window.__wd || {
       join(ids.map((id) => document.getElementById(id))) ||
       join(Array.from(el.labels || [])) ||
       el.getAttribute('title') || el.getAttribute('alt') || el.value || el.textContent || '';
-    return String(v).trim().toLowerCase();
+    // Accessible names collapse formatting whitespace, line breaks included.
+    return String(v).replace(/\s+/g, ' ').trim().toLowerCase();
   },
   role(el) {
     const explicit = el.getAttribute('role');
