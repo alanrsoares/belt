@@ -499,6 +499,15 @@ impl CdpSession {
         started
     }
 
+    pub fn set_record_speed(&mut self, factor: f64) -> Result<(), String> {
+        let r = self
+            .recording
+            .as_mut()
+            .ok_or("not recording; start with 'record <path>'")?;
+        r.recorder.set_speed_now(factor);
+        Ok(())
+    }
+
     pub fn is_recording(&self) -> bool {
         self.recording.is_some()
     }
@@ -1172,6 +1181,21 @@ impl CdpSession {
         self.release(&object_id);
         self.evaluate(TWO_FRAMES_JS)?;
         Ok(())
+    }
+
+    /// Whether `spec` names a visible element right now, without waiting.
+    /// A locator that cannot run (bad CSS, stale ref) is an error, not `false`.
+    pub fn is_visible(&mut self, spec: &str) -> Result<bool, String> {
+        match self.resolve(spec, 0) {
+            Ok(object_id) => {
+                self.release(&object_id);
+                Ok(true)
+            }
+            Err(e) if e.starts_with("no element matched") || e.contains("is not visible") => {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Wait until the current URL contains `substring`.

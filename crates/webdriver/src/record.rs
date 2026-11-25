@@ -17,7 +17,11 @@ const FPS: f64 = 25.0;
 pub struct Recorder {
     out: String,
     dir: PathBuf,
+    /// Frame times on the video's clock, which `speed` runs faster or slower.
     stamps: Vec<f64>,
+    /// Since `anchor.0` (real time), the video's clock runs at `speed`.
+    anchor: (f64, f64),
+    speed: f64,
     /// First frame that could not be stored; `finish` reports it.
     error: Option<String>,
 }
@@ -40,8 +44,25 @@ impl Recorder {
             out: out.to_string(),
             dir,
             stamps: Vec::new(),
+            anchor: (0.0, 0.0),
+            speed: 1.0,
             error: None,
         })
+    }
+
+    /// Real time `t` on the video's clock.
+    fn at(&self, t: f64) -> f64 {
+        self.anchor.1 + (t - self.anchor.0) / self.speed
+    }
+
+    /// From real time `at` on, play the video at `factor` times real speed.
+    pub fn set_speed(&mut self, at: f64, factor: f64) {
+        self.anchor = (at, self.at(at));
+        self.speed = factor;
+    }
+
+    pub fn set_speed_now(&mut self, factor: f64) {
+        self.set_speed(now_secs(), factor);
     }
 
     /// Store a frame. A failure is kept for `finish` rather than returned,
@@ -52,7 +73,7 @@ impl Recorder {
             fs::write(&path, jpeg).map_err(|e| format!("failed to write '{}': {e}", path.display()))
         });
         match stored {
-            Ok(()) => self.stamps.push(timestamp),
+            Ok(()) => self.stamps.push(self.at(timestamp)),
             Err(e) => {
                 self.error.get_or_insert(e);
             }
@@ -76,7 +97,7 @@ impl Recorder {
             return Err("recording captured no frames".to_string());
         }
         let list = self.dir.join("frames.ffconcat");
-        let end = now_secs();
+        let end = self.at(now_secs());
         fs::write(&list, concat_list(&self.stamps, end))
             .map_err(|e| format!("failed to write '{}': {e}", list.display()))?;
 
@@ -230,6 +251,21 @@ mod tests {
         let list = concat_list(&[10.0, 11.0], 11.01);
         assert!(list.ends_with("file '000001.jpg'\nduration 0.04\nfile '000001.jpg'\n"));
         assert_eq!(grid_len(&[10.0, 11.0], 11.01), 1.04);
+    }
+
+    #[test]
+    fn speed_shortens_only_what_follows_it() {
+        let out = std::env::temp_dir().join(format!("wd-rec-speed-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(out.to_str().unwrap()).unwrap();
+        rec.add(10.0, Ok(vec![0xff]));
+        rec.add(11.0, Ok(vec![0xff]));
+        rec.set_speed(12.0, 4.0);
+        rec.add(12.0, Ok(vec![0xff]));
+        rec.add(16.0, Ok(vec![0xff]));
+        // 2s at 1x, then 8s at 4x: the video is 4s, not 10s.
+        assert_eq!(rec.stamps, vec![10.0, 11.0, 12.0, 13.0]);
+        assert_eq!(rec.at(20.0), 14.0);
+        rec.discard();
     }
 
     #[test]

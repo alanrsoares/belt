@@ -83,6 +83,17 @@ pub enum Step {
     Record {
         path: Option<String>,
     },
+    /// Play the video from here at `factor` times real speed.
+    RecordSpeed {
+        factor: f64,
+    },
+    /// Run `then` only if `selector` is visible now (`visible`), or only if it
+    /// is not. Checked once, without waiting.
+    If {
+        selector: String,
+        visible: bool,
+        then: Box<Step>,
+    },
     /// Overlay caption; `duration_ms == 0` keeps it until the next caption.
     Caption {
         text: String,
@@ -306,6 +317,34 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 let duration_ms = parse_duration_ms(&tokens[idx])?;
                 steps.push(Step::Wait { duration_ms });
                 idx += 1;
+            }
+            "if" | "unless" => {
+                idx += 1;
+                let selector = tokens
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| format!("'{tok}' requires <locator> <step>"))?;
+                let mut rest = parse_tokens(&tokens[idx + 1..], default_timeout_ms)?.into_iter();
+                let then = rest
+                    .next()
+                    .ok_or_else(|| format!("'{tok}' requires a step after the locator"))?;
+                steps.push(Step::If {
+                    selector,
+                    visible: tok == "if",
+                    then: Box::new(then),
+                });
+                steps.extend(rest);
+                idx = tokens.len();
+            }
+            "record" if tokens.get(idx + 1).is_some_and(|t| t == "speed") => {
+                idx += 2;
+                let factor = tokens
+                    .get(idx)
+                    .and_then(|t| t.parse::<f64>().ok())
+                    .filter(|f| f.is_finite() && *f > 0.0)
+                    .ok_or("'record speed' requires a factor above 0 (e.g. 4, 0.5)")?;
+                idx += 1;
+                steps.push(Step::RecordSpeed { factor });
             }
             "record" => {
                 idx += 1;
@@ -681,6 +720,8 @@ fn is_verb(s: &str) -> bool {
             | "frame"
             | "record"
             | "caption"
+            | "if"
+            | "unless"
             | "close"
             | "quit"
             | "exit"
@@ -1019,6 +1060,52 @@ mod tests {
             }]
         );
         assert!(parse_script("find", 1000).is_err());
+    }
+
+    #[test]
+    fn if_and_unless_guard_the_next_step() {
+        let steps = parse_script(
+            "if \"role=button:Review\" click role=button:Review\nunless .open hover .x\nurl",
+            1000,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                Step::If {
+                    selector: "role=button:Review".into(),
+                    visible: true,
+                    then: Box::new(Step::Click {
+                        selector: "role=button:Review".into()
+                    }),
+                },
+                Step::If {
+                    selector: ".open".into(),
+                    visible: false,
+                    then: Box::new(Step::Hover {
+                        selector: ".x".into()
+                    }),
+                },
+                Step::Url,
+            ]
+        );
+        // Only the first step is guarded; the rest of the line runs anyway.
+        let line = parse_script("if .a click .b url", 1000).unwrap();
+        assert!(matches!(line[0], Step::If { .. }));
+        assert_eq!(line[1], Step::Url);
+        assert!(parse_script("if .a", 1000).is_err());
+        assert!(parse_script("unless", 1000).is_err());
+    }
+
+    #[test]
+    fn record_speed_takes_a_positive_factor() {
+        assert_eq!(
+            parse_script("record speed 4", 1000).unwrap(),
+            vec![Step::RecordSpeed { factor: 4.0 }]
+        );
+        assert!(parse_script("record speed 0", 1000).is_err());
+        assert!(parse_script("record speed fast", 1000).is_err());
+        assert!(parse_script("record speed", 1000).is_err());
     }
 
     #[test]

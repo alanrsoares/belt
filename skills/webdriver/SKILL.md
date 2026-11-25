@@ -42,7 +42,7 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 
 ## Verbs
 
-- `goto <url>` — Navigate. The first URL argument is an implicit `goto`.
+- `goto <url>` — Navigate. The first URL argument is an implicit `goto`. If the page ends on another origin (a sign-in redirect), it prints `warn` with both origins: the session may have expired.
 - `reload` — Reload the current page.
 - `viewport <w> <h>` — Set the window size (`1440 900` or `1440x900`).
 - `wait-for <loc> [timeout]` — Wait until the element is visible and painted.
@@ -69,6 +69,9 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 - `pdf [path]` — Print the page to PDF.
 - `html [path]` — Dump the current HTML to a file or stdout.
 - `record <path>|stop` — Screencast to a video (`.mp4`, `.mov`, `.webm`, `.gif`, `.mkv`) through `ffmpeg`. Without `ffmpeg`, it keeps JPEG frames and a `frames.ffconcat` list in `<path>.frames/`. While it records, a cursor shows, mouse moves glide, and typing goes one character at a time. A script that ends while it records stops the recording.
+- `record speed <x>` — From here on, the video plays at `x` times real speed (`4` for a slow wait, `1` to go back). Captions and waits keep real time in the browser; only the video is shorter.
+- `if <loc> <step>` — Run the step only if the element is visible now. It checks once and does not wait. A skipped step prints `ok skipped: …`. Quote a locator that has spaces.
+- `unless <loc> <step>` — Run the step only if the element is not visible now: `unless "role=button:Import…" click role=button:Review` opens a folded panel and leaves an open one alone.
 - `caption [text] [duration]` — Show a caption over the page (for `record`). It stays until the next caption, or for `duration`. `caption` with no text clears it. The next argument is always the text, so `caption close` shows "close". `goto` and `reload` show it again; a navigation from a click does not.
 - `close` — End the run (useful in `--repl`).
 
