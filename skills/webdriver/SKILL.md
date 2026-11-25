@@ -51,6 +51,7 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 - `wait <duration>` — Fixed sleep (`500ms`, `2s`, `1m`).
 - `click <loc>` — Click the element.
 - `hover <loc>` — Real mouse move, so CSS `:hover` applies.
+- `upload <loc> <path>` — Attach a local file without opening the OS picker. The locator may name the file input (hidden is fine), an element that contains one, or its `<label>`. Fires `input` and `change`.
 - `press <key>` — Key chord: `Enter`, `Escape`, `Meta+O`.
 - `type <loc> <text>` — Append text.
 - `fill <loc> <text>` — Clear, then type.
@@ -67,6 +68,8 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 - `screenshot [path] [--full-page] [--selector <loc>]` — Capture a PNG.
 - `pdf [path]` — Print the page to PDF.
 - `html [path]` — Dump the current HTML to a file or stdout.
+- `record <path>|stop` — Screencast to a video (`.mp4`, `.mov`, `.webm`, `.gif`, `.mkv`) through `ffmpeg`. Without `ffmpeg`, it keeps JPEG frames and a `frames.ffconcat` list in `<path>.frames/`. While it records, a cursor shows, mouse moves glide, and typing goes one character at a time. A script that ends while it records stops the recording.
+- `caption [text] [duration]` — Show a caption over the page (for `record`). It stays until the next caption, or for `duration`. `caption` with no text clears it. The next argument is always the text, so `caption close` shows "close". `goto` and `reload` show it again; a navigation from a click does not.
 - `close` — End the run (useful in `--repl`).
 
 ## Options
