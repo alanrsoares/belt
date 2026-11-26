@@ -137,6 +137,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Action, String> 
             }
             _ => {
                 step_tokens.push(arg);
+                step_tokens.extend(cursor);
+                break;
             }
         }
     }
@@ -221,7 +223,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} <w> <h>               Set window size (e.g. 1280 800 or 1280x800)
     {} <loc> [timeout]       Wait until element is visible AND painted
     {} <substr> [t]      Wait until URL contains substring (redirects)
-    {} [quiet]     Wait until DOM stops mutating (default 500ms)
+    {} [quiet]     Wait until DOM stops mutating (default 500ms; alias: settle)
     {} <duration>                Fixed sleep (e.g. 500ms, 2s, 1m)
     {} <locator>                Click element
     {} <locator>                Real mouse move, so CSS :hover applies
@@ -405,6 +407,48 @@ mod tests {
                 assert!(!opts.headless);
                 assert_eq!(opts.custom_browser, Some("/path/to/chrome".to_string()));
                 assert_eq!(opts.steps.len(), 1);
+            }
+            _ => panic!("expected Run action"),
+        }
+    }
+
+    #[test]
+    fn cli_stops_parsing_flags_once_steps_begin() {
+        let args: Vec<String> = [
+            "https://example.com",
+            "wait-for",
+            ".ready",
+            "--timeout",
+            "5s",
+            "screenshot",
+            "out.png",
+            "--full-page",
+            "--selector",
+            ".card",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        match parse_args(&args).expect("parse failed") {
+            Action::Run(opts) => {
+                assert_eq!(opts.default_timeout_ms, 30_000);
+                assert_eq!(opts.session_name, None);
+                assert_eq!(
+                    opts.steps,
+                    vec![
+                        Step::Goto("https://example.com".into()),
+                        Step::WaitFor {
+                            selector: ".ready".into(),
+                            timeout_ms: 5_000,
+                        },
+                        Step::Screenshot {
+                            path: "out.png".into(),
+                            full_page: true,
+                            selector: Some(".card".into()),
+                        },
+                    ]
+                );
             }
             _ => panic!("expected Run action"),
         }
