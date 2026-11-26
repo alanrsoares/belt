@@ -168,19 +168,20 @@ pub fn parse_script(script: &str, default_timeout_ms: u64) -> Result<Vec<Step>, 
 /// Split a line into tokens, respecting single and double quotes.
 pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
-    let mut current = String::new();
+    let mut current: Option<String> = None;
     let mut in_quote = None;
     let mut escape = false;
 
     for ch in line.chars() {
         if escape {
-            current.push(ch);
+            current.get_or_insert_with(String::new).push(ch);
             escape = false;
             continue;
         }
 
-        if ch == '\\' {
+        if ch == '\\' && in_quote != Some('\'') {
             escape = true;
+            current.get_or_insert_with(String::new);
             continue;
         }
 
@@ -188,31 +189,32 @@ pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
             if ch == q {
                 in_quote = None;
             } else {
-                current.push(ch);
+                current.get_or_insert_with(String::new).push(ch);
             }
-        } else if (ch == '"' || ch == '\'') && current.is_empty() {
+        } else if (ch == '"' || ch == '\'') && current.is_none() {
             // Quotes only group when they open a token, so JS like
             // `eval document.getElementById("out")` keeps its inner quotes.
             in_quote = Some(ch);
+            current = Some(String::new());
         } else if ch.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
+            if let Some(tok) = current.take() {
+                tokens.push(tok);
             }
         } else {
-            current.push(ch);
+            current.get_or_insert_with(String::new).push(ch);
         }
     }
 
     if escape {
-        current.push('\\');
+        current.get_or_insert_with(String::new).push('\\');
     }
 
     if in_quote.is_some() {
         return Err("unclosed quote in line".to_string());
     }
 
-    if !current.is_empty() {
-        tokens.push(current);
+    if let Some(tok) = current {
+        tokens.push(tok);
     }
 
     Ok(tokens)
@@ -234,18 +236,18 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
         }
 
         match tok.as_str() {
-            "goto" | "open" | "navigate" => {
+            "goto" => {
                 idx += 1;
                 if idx >= tokens.len() {
-                    return Err(format!("'{tok}' requires a URL argument"));
+                    return Err("'goto' requires a URL argument".to_string());
                 }
                 steps.push(Step::Goto(tokens[idx].clone()));
                 idx += 1;
             }
-            "viewport" | "resize" => {
+            "viewport" => {
                 idx += 1;
                 if idx >= tokens.len() {
-                    return Err(format!("'{tok}' requires width and height arguments"));
+                    return Err("'viewport' requires width and height arguments".to_string());
                 }
                 let w_str = &tokens[idx];
                 idx += 1;
@@ -263,7 +265,7 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     (w, h)
                 } else {
                     if idx >= tokens.len() {
-                        return Err(format!("'{tok}' requires height after width"));
+                        return Err("'viewport' requires height after width".to_string());
                     }
                     let w = w_str
                         .parse::<u32>()
@@ -279,21 +281,20 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     height: h,
                 });
             }
-            "wait-for" | "waitfor" => {
+            "wait-for" => {
                 idx += 1;
                 if idx >= tokens.len() {
-                    return Err(format!("'{tok}' requires a CSS selector argument"));
+                    return Err("'wait-for' requires a locator argument".to_string());
                 }
                 let selector = tokens[idx].clone();
                 idx += 1;
 
                 let mut timeout_ms = default_timeout_ms;
                 if idx < tokens.len() {
-                    if tokens[idx] == "--timeout" || tokens[idx] == "-t" {
-                        let flag = &tokens[idx];
+                    if tokens[idx] == "--timeout" {
                         idx += 1;
                         if idx >= tokens.len() {
-                            return Err(format!("'{flag}' requires a duration argument"));
+                            return Err("'--timeout' requires a duration argument".to_string());
                         }
                         timeout_ms = parse_duration_ms(&tokens[idx])?;
                         idx += 1;
@@ -307,12 +308,10 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     timeout_ms,
                 });
             }
-            "wait" | "sleep" => {
+            "wait" => {
                 idx += 1;
                 if idx >= tokens.len() {
-                    return Err(format!(
-                        "'{tok}' requires a duration argument (e.g. 500ms, 2s)"
-                    ));
+                    return Err("'wait' requires a duration argument (e.g. 500ms, 2s)".to_string());
                 }
                 let duration_ms = parse_duration_ms(&tokens[idx])?;
                 steps.push(Step::Wait { duration_ms });
@@ -350,8 +349,8 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 let path = match tokens.get(idx) {
                     Some(t) if t == "stop" => None,
-                    Some(t) if !is_verb(t) => Some(t.clone()),
-                    _ => return Err("'record' requires <path> or 'stop'".to_string()),
+                    Some(t) => Some(t.clone()),
+                    None => return Err("'record' requires <path> or 'stop'".to_string()),
                 };
                 idx += 1;
                 steps.push(Step::Record { path });
@@ -359,7 +358,7 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             "caption" => {
                 idx += 1;
                 // Always takes the next argument as text, so `caption close`
-                // shows "close". Bare `caption` clears: the tokenizer drops `""`.
+                // shows "close". Bare `caption` or `caption ""` clears it.
                 let text = tokens.get(idx).cloned().unwrap_or_default();
                 idx += 1;
                 let mut duration_ms = 0;
@@ -371,15 +370,18 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             }
             "click" => {
                 idx += 1;
-                let selector = take_locator(tokens, &mut idx)
-                    .ok_or_else(|| "click requires a locator argument".to_string())?;
+                let selector = tokens
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| "'click' requires a locator argument".to_string())?;
+                idx += 1;
                 steps.push(Step::Click { selector });
             }
-            "type" | "fill" | "input" => {
+            "type" | "fill" => {
                 let clear = tok == "fill";
                 idx += 1;
                 if idx + 1 >= tokens.len() {
-                    return Err(format!("'{tok}' requires <selector> and <text> arguments"));
+                    return Err(format!("'{tok}' requires <locator> and <text> arguments"));
                 }
                 let selector = tokens[idx].clone();
                 let text = tokens[idx + 1].clone();
@@ -390,31 +392,30 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 });
                 idx += 2;
             }
-            "eval" | "exec" | "js" => {
+            "eval" => {
                 idx += 1;
                 if idx >= tokens.len() {
-                    return Err("eval requires a JavaScript expression argument".to_string());
+                    return Err("'eval' requires a JavaScript expression argument".to_string());
                 }
                 steps.push(Step::Eval {
                     expr: tokens[idx].clone(),
                 });
                 idx += 1;
             }
-            "screenshot" | "--screenshot" => {
+            "screenshot" => {
                 idx += 1;
                 let mut path = "screenshot.png".to_string();
                 let mut full_page = false;
                 let mut selector = None;
 
                 while idx < tokens.len() {
-                    if tokens[idx] == "--full-page" || tokens[idx] == "-f" {
+                    if tokens[idx] == "--full-page" {
                         full_page = true;
                         idx += 1;
-                    } else if tokens[idx] == "--selector" || tokens[idx] == "-s" {
-                        let flag = &tokens[idx];
+                    } else if tokens[idx] == "--selector" {
                         idx += 1;
                         if idx >= tokens.len() {
-                            return Err(format!("'{flag}' requires a selector argument"));
+                            return Err("'--selector' requires a locator argument".to_string());
                         }
                         selector = Some(tokens[idx].clone());
                         idx += 1;
@@ -436,7 +437,7 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     selector,
                 });
             }
-            "pdf" | "--pdf" => {
+            "pdf" => {
                 idx += 1;
                 let path = if idx < tokens.len()
                     && !tokens[idx].starts_with('-')
@@ -489,7 +490,7 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                     timeout_ms: default_timeout_ms,
                 });
             }
-            "press" | "key" => {
+            "press" => {
                 idx += 1;
                 if idx >= tokens.len() {
                     return Err("'press' requires a key (e.g. Enter, Meta+O)".to_string());
@@ -512,11 +513,14 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
             }
             "hover" => {
                 idx += 1;
-                let selector = take_locator(tokens, &mut idx)
-                    .ok_or_else(|| "'hover' requires a locator".to_string())?;
+                let selector = tokens
+                    .get(idx)
+                    .cloned()
+                    .ok_or_else(|| "'hover' requires a locator argument".to_string())?;
+                idx += 1;
                 steps.push(Step::Hover { selector });
             }
-            "snapshot" | "aria" => {
+            "snapshot" => {
                 idx += 1;
                 let mut all = false;
                 if idx < tokens.len() && tokens[idx] == "--all" {
@@ -576,7 +580,6 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 idx += 1;
                 let query = tokens
                     .get(idx)
-                    .filter(|t| !is_verb(t))
                     .cloned()
                     .ok_or("find requires a query (role or name text)")?;
                 idx += 1;
@@ -614,11 +617,11 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
                 }
                 steps.push(Step::Console { mode });
             }
-            "close" | "quit" | "exit" => {
+            "close" => {
                 idx += 1;
                 steps.push(Step::Close);
             }
-            "html" | "--html" | "dump" => {
+            "html" => {
                 idx += 1;
                 let path = if idx < tokens.len()
                     && !tokens[idx].starts_with('-')
@@ -645,27 +648,6 @@ pub fn parse_tokens(tokens: &[String], default_timeout_ms: u64) -> Result<Vec<St
     Ok(steps)
 }
 
-/// Consume the locator for a verb that takes exactly one, joining unquoted
-/// words up to the next verb.
-///
-/// `click text=Late Button` is what anyone would type, and a locator is the
-/// whole rest of the argument list either way — but stopping at a verb keeps
-/// `click .btn screenshot out.png` working on the command line.
-fn take_locator(tokens: &[String], idx: &mut usize) -> Option<String> {
-    let mut parts = Vec::new();
-
-    while *idx < tokens.len() && !is_verb(&tokens[*idx]) {
-        parts.push(tokens[*idx].clone());
-        *idx += 1;
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
-}
-
 fn is_url(s: &str) -> bool {
     s.starts_with("http://")
         || s.starts_with("https://")
@@ -678,34 +660,21 @@ fn is_verb(s: &str) -> bool {
     matches!(
         s,
         "goto"
-            | "open"
-            | "navigate"
             | "viewport"
-            | "resize"
             | "wait-for"
-            | "waitfor"
             | "wait"
-            | "sleep"
             | "click"
             | "type"
             | "fill"
-            | "input"
             | "eval"
-            | "exec"
-            | "js"
             | "screenshot"
-            | "--screenshot"
             | "pdf"
-            | "--pdf"
             | "html"
-            | "--html"
-            | "dump"
             | "reload"
             | "wait-for-url"
             | "wait-for-hydration"
             | "settle"
             | "press"
-            | "key"
             | "hover"
             | "upload"
             | "url"
@@ -716,15 +685,12 @@ fn is_verb(s: &str) -> bool {
             | "find"
             | "console"
             | "snapshot"
-            | "aria"
             | "frame"
             | "record"
             | "caption"
             | "if"
             | "unless"
             | "close"
-            | "quit"
-            | "exit"
     )
 }
 
@@ -740,7 +706,7 @@ mod tests {
             ".my-css-selector".to_string(),
             "--timeout".to_string(),
             "60s".to_string(),
-            "--screenshot".to_string(),
+            "screenshot".to_string(),
         ];
 
         let steps = parse_tokens(&args, 30_000).expect("parse failed");
@@ -865,14 +831,18 @@ mod tests {
     }
 
     #[test]
-    fn click_locator_spans_words_but_stops_at_a_verb() {
-        let steps = parse_script("click text=Late Button", 30_000).expect("parse failed");
+    fn click_takes_single_locator_token() {
+        let steps = parse_script("click \"text=Late Button\"", 30_000).expect("parse failed");
         assert_eq!(
             steps[0],
             Step::Click {
                 selector: "text=Late Button".to_string()
             }
         );
+
+        // Unquoted multi-word locators are rejected uniformly across all verbs.
+        assert!(parse_script("click text=Late Button", 30_000).is_err());
+        assert!(parse_script("hover text=Late Button", 30_000).is_err());
 
         let mixed = parse_tokens(
             &[
@@ -988,16 +958,10 @@ mod tests {
         )
         .is_err());
         assert!(parse_tokens(
-            &["wait-for".to_string(), "#el".to_string(), "-t".to_string()],
-            30_000
-        )
-        .is_err());
-        assert!(parse_tokens(
             &["screenshot".to_string(), "--selector".to_string()],
             30_000
         )
         .is_err());
-        assert!(parse_tokens(&["screenshot".to_string(), "-s".to_string()], 30_000).is_err());
     }
 
     #[test]
@@ -1051,15 +1015,41 @@ mod tests {
     }
 
     #[test]
-    fn find_needs_a_query() {
-        let steps = parse_script("find 'Link 250'", 1000).unwrap();
+    fn find_needs_a_query_and_allows_verb_names() {
+        let steps = parse_script("find 'Link 250'\nfind close", 1000).unwrap();
         assert_eq!(
             steps,
-            vec![Step::Find {
-                query: "Link 250".into()
-            }]
+            vec![
+                Step::Find {
+                    query: "Link 250".into()
+                },
+                Step::Find {
+                    query: "close".into()
+                },
+            ]
         );
         assert!(parse_script("find", 1000).is_err());
+    }
+
+    #[test]
+    fn tokenize_preserves_empty_quotes_and_single_quote_backslashes() {
+        assert_eq!(
+            tokenize_line(r#"fill #q """#).unwrap(),
+            vec!["fill", "#q", ""]
+        );
+        assert_eq!(tokenize_line("fill #q ''").unwrap(), vec!["fill", "#q", ""]);
+        assert_eq!(
+            tokenize_line(r"eval 'C:\foo\bar'").unwrap(),
+            vec!["eval", r"C:\foo\bar"]
+        );
+        assert_eq!(
+            parse_script(r#"fill #q """#, 1000).unwrap(),
+            vec![Step::Type {
+                selector: "#q".into(),
+                text: String::new(),
+                clear: true,
+            }]
+        );
     }
 
     #[test]
@@ -1141,6 +1131,12 @@ mod tests {
             ]
         );
         assert!(parse_script("record", 1000).is_err());
+        assert_eq!(
+            parse_script("record close", 1000).unwrap(),
+            vec![Step::Record {
+                path: Some("close".into())
+            }]
+        );
         assert_eq!(
             parse_script("upload \"#file\" ./a.docx", 1000).unwrap(),
             vec![Step::Upload {

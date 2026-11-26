@@ -47,7 +47,7 @@ Actions retry until the element is present and visible, up to `--timeout`. Do no
 - `viewport <w> <h>` — Set the window size (`1440 900` or `1440x900`).
 - `wait-for <loc> [timeout]` — Wait until the element is visible and painted.
 - `wait-for-url <substr> [timeout]` — Wait until the URL contains the text (redirects).
-- `wait-for-hydration [quiet]` — Wait until the DOM stops changing (default `500ms`).
+- `wait-for-hydration [quiet]` — Wait until the DOM stops changing (default `500ms`; alias: `settle`).
 - `wait <duration>` — Fixed sleep (`500ms`, `2s`, `1m`).
 - `click <loc>` — Click the element.
 - `hover <loc>` — Real mouse move, so CSS `:hover` applies.
