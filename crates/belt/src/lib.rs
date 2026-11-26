@@ -26,11 +26,6 @@ pub struct Tool {
 
 pub const TOOLS: &[Tool] = &[
     Tool {
-        name: "scaffold",
-        summary: "Offline project scaffolder (TS/Bun/Biome, Rust, Go, Python/uv). Writes files into the working directory.",
-        destructive: true,
-    },
-    Tool {
         name: "portkill",
         summary: "Inspect listening ports and kill the processes that hold them.",
         destructive: true,
@@ -41,11 +36,6 @@ pub const TOOLS: &[Tool] = &[
         destructive: false,
     },
     Tool {
-        name: "devclean",
-        summary: "Scan for build artifacts across ecosystems and reclaim disk space. `--clean` deletes them.",
-        destructive: true,
-    },
-    Tool {
         name: "fanout",
         summary: "Run quality gates and task matrices concurrently, with DAG ordering and Git change detection.",
         destructive: false,
@@ -53,11 +43,6 @@ pub const TOOLS: &[Tool] = &[
     Tool {
         name: "webdriver",
         summary: "Browser automation: screenshots, PDF export, DOM dumps, clicks and persistent sessions (`--session`).",
-        destructive: false,
-    },
-    Tool {
-        name: "grabsite",
-        summary: "Screenshot a page in a GUI browser for builds with CDP disabled.",
         destructive: false,
     },
     Tool {
@@ -669,12 +654,12 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(tools.len(), TOOLS.len() + BROWSER_TOOLS.len());
-        let devclean = tools
+        let portkill = tools
             .iter()
-            .find(|t| t.get("name").unwrap().as_str() == Some("devclean"))
+            .find(|t| t.get("name").unwrap().as_str() == Some("portkill"))
             .unwrap();
         assert_eq!(
-            devclean
+            portkill
                 .get("annotations")
                 .unwrap()
                 .get("destructiveHint")

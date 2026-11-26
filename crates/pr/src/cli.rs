@@ -41,7 +41,7 @@ impl Default for Parsed {
     }
 }
 
-pub const VERSION: &str = "belt-pr 0.1.0";
+pub const VERSION: &str = concat!("belt-pr ", env!("CARGO_PKG_VERSION"));
 
 pub const HELP: &str = r#"belt-pr [TARGET] [OPTIONS] — terminal-friendly GitHub pull request overview.
 

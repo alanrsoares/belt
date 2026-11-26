@@ -32,7 +32,7 @@ mod tests {
     fn parses_arrays_and_objects() {
         let json = r#"
         {
-            "name": "renkonos",
+            "name": "acme",
             "private": true,
             "workspaces": {
                 "packages": [
@@ -47,7 +47,7 @@ mod tests {
         }
         "#;
         let v = parse(json).unwrap();
-        assert_eq!(v.get("name").and_then(|n| n.as_str()), Some("renkonos"));
+        assert_eq!(v.get("name").and_then(|n| n.as_str()), Some("acme"));
         assert_eq!(v.get("private"), Some(&JsonValue::Bool(true)));
 
         let ws = v.get("workspaces").unwrap();

@@ -39,7 +39,7 @@ impl Default for Parsed {
     }
 }
 
-pub const VERSION: &str = "jwt 0.1.0";
+pub const VERSION: &str = concat!("jwt ", env!("CARGO_PKG_VERSION"));
 
 pub const HELP: &str = r#"jwt [TOKEN] [OPTIONS] — inspect and decode JSON Web Tokens.
 

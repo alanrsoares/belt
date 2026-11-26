@@ -13,25 +13,19 @@
 resolver = "2"
 members = [
     "crates/local-common",
-    "crates/scaffold",
     "crates/portkill",
     "crates/jwt",
-    "crates/devclean",
     "crates/fanout",
     "crates/webdriver",
-    "crates/grabsite",
     "crates/pr",
     "crates/belt",
 ]
 default-members = [
     "crates/local-common",
-    "crates/scaffold",
     "crates/portkill",
     "crates/jwt",
-    "crates/devclean",
     "crates/fanout",
     "crates/webdriver",
-    "crates/grabsite",
     "crates/pr",
     "crates/belt",
 ]

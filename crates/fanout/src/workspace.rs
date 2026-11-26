@@ -604,10 +604,10 @@ mod tests {
     #[test]
     fn test_glob_match() {
         assert!(glob_match("*", "anything"));
-        assert!(glob_match("@renkonos/*", "@renkonos/ui"));
-        assert!(glob_match("@renkonos/*", "@renkonos/core"));
-        assert!(!glob_match("@renkonos/*", "@other/ui"));
-        assert!(glob_match("*ui*", "@renkonos/ui"));
+        assert!(glob_match("@acme/*", "@acme/ui"));
+        assert!(glob_match("@acme/*", "@acme/core"));
+        assert!(!glob_match("@acme/*", "@other/ui"));
+        assert!(glob_match("*ui*", "@acme/ui"));
         assert!(glob_match("*dashboard*", "apps/dashboard"));
         assert!(glob_match("packages/*", "packages/core"));
     }

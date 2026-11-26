@@ -18,8 +18,8 @@ pub fn run<I: IntoIterator<Item = String>>(args: I) -> i32 {
     let p = match cli::parse(args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("pr: {e}");
-            eprintln!("run `pr --help` for usage.");
+            eprintln!("belt-pr: {e}");
+            eprintln!("run `belt-pr --help` for usage.");
             return 1;
         }
     };

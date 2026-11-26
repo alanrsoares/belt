@@ -241,7 +241,7 @@ pub fn print_help(out: &mut impl Write, c: &Colour) {
     {} [path] [flags]      Capture PNG (flags: --full-page, --selector <loc>)
     {} [path]                     Print page to PDF
     {} [path]                    Dump current HTML to file or stdout
-    {} <path> | stop            Screencast via ffmpeg (.mp4/.mov/.webm/.gif), with cursor and paced input
+    {} <path> | stop            Screencast via ffmpeg (.mp4/.mov/.webm/.gif/.mkv), with cursor and paced input
     record speed <x>               Play the video from here at x times real speed (4 = fast, 1 = normal)
     {} [text] [duration]       Overlay caption, kept until the next one unless timed; bare clears
     {} / {} <loc> <step>       Run the next step only if <loc> is visible now (if) or not (unless)

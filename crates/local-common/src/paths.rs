@@ -64,14 +64,14 @@ mod tests {
 
     #[test]
     fn join_under_composes_the_documented_layout() {
-        let root = PathBuf::from("/Users/alana");
+        let root = PathBuf::from("/Users/test");
         assert_eq!(
-            join_under(&root, ".config", "scaffold"),
-            PathBuf::from("/Users/alana/.config/belt/scaffold")
+            join_under(&root, ".config", "webdriver"),
+            PathBuf::from("/Users/test/.config/belt/webdriver")
         );
         assert_eq!(
-            join_under(&root, ".local/share", "scaffold"),
-            PathBuf::from("/Users/alana/.local/share/belt/scaffold")
+            join_under(&root, ".local/share", "webdriver"),
+            PathBuf::from("/Users/test/.local/share/belt/webdriver")
         );
     }
 
