@@ -37,7 +37,7 @@ impl Default for Parsed {
     }
 }
 
-pub const VERSION: &str = "portkill 0.1.0";
+pub const VERSION: &str = concat!("portkill ", env!("CARGO_PKG_VERSION"));
 
 pub const HELP: &str = r#"portkill [PORTS...] [OPTIONS] — inspect and kill processes on listening ports.
 

@@ -15,8 +15,8 @@
 set -eu
 
 REPO="alanrsoares/belt"
-ALL_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite belt-pr belt"
-LEGACY_TOOLS="scaffold portkill jwt devclean fanout webdriver grabsite belt"
+ALL_TOOLS="portkill jwt fanout webdriver belt-pr belt"
+LEGACY_TOOLS="portkill jwt fanout webdriver belt"
 BIN_DIR="${BELT_BIN_DIR:-$HOME/.local/bin}"
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 

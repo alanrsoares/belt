@@ -10,21 +10,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "devclean"
-version = "0.1.0"
-dependencies = [
- "local-common",
-]
-
-[[package]]
 name = "fanout"
-version = "0.1.0"
-dependencies = [
- "local-common",
-]
-
-[[package]]
-name = "grabsite"
 version = "0.1.0"
 dependencies = [
  "local-common",
@@ -50,13 +36,6 @@ dependencies = [
 
 [[package]]
 name = "pr"
-version = "0.1.0"
-dependencies = [
- "local-common",
-]
-
-[[package]]
-name = "scaffold"
 version = "0.1.0"
 dependencies = [
  "local-common",

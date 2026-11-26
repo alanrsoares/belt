@@ -227,7 +227,7 @@ mod tests {
             "--jobs".into(),
             "8".into(),
             "--filter".into(),
-            "@renkonos/*".into(),
+            "@acme/*".into(),
             "-s".into(),
             "main".into(),
             "--timeout".into(),
@@ -243,7 +243,7 @@ mod tests {
         assert!(opts.topological);
         assert_eq!(opts.tail_lines, 100);
         assert_eq!(opts.jobs, 8);
-        assert_eq!(opts.filter.as_deref(), Some("@renkonos/*"));
+        assert_eq!(opts.filter.as_deref(), Some("@acme/*"));
         assert_eq!(opts.since.as_deref(), Some("main"));
         assert_eq!(opts.timeout_ms, 60_000);
         assert_eq!(opts.passthrough_args, vec!["--coverage", "-u"]);

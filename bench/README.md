@@ -1,6 +1,6 @@
 # Webdriver benchmark
 
-Design: `.scratch/webdriver-benchmark.md`. Status: arm A (scripted replay) only.
+Status: arm A (scripted replay) only.
 
 ```sh
 cargo build --release -p belt -p webdriver

@@ -3,13 +3,16 @@
 //! Deliberately dependency-free (standard library only) so every tool that
 //! re-uses it builds and tests with no network access.
 //!
-//! Three concerns live here today:
+//! Six modules live here:
+//! * [`base64`]  — standard and URL-safe base64 encoding/decoding.
+//! * [`cli`]     — lightweight argument cursor, flag splitting, and typo suggestions.
+//! * [`json`]    — minimal zero-dependency JSON parser and serializer.
 //! * [`paths`]   — consistent per-tool configuration and data locations.
+//! * [`process`] — process-group spawn/cleanup helpers for subprocesses that
+//!   fork children of their own.
 //! * [`term`]    — terminal-aware output helpers (colour that silently
 //!   disables when stdout is not a TTY or when the user has opted out via
 //!   `NO_COLOR`).
-//! * [`process`] — process-group spawn/cleanup helpers for subprocesses that
-//!   fork children of their own.
 //!
 //! Add new cross-cutting concern as its own module and re-export the small,
 //! stable public surface from here so tool crates keep a single import path.

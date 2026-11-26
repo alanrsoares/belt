@@ -61,9 +61,14 @@ from `webdriver --help`.
 ```
 belt/
 ├── Cargo.toml              # workspace manifest (members, lint policy, shared deps)
+├── Justfile                # dev, test, install, and release recipes
+├── install.sh              # macOS & Linux prebuilt binary installer
+├── install.ps1             # Windows PowerShell installer
 ├── crates/
-│    ├── local-common/       # shared plumbing (paths, terminal helpers, …)
-│    └── <tool>/             # one crate per tool, added as we build them
+│   ├── local-common/       # shared plumbing (paths, terminal, cli, json, base64, process)
+│   └── <tool>/             # one crate per tool
+├── skills/                 # agent skills for belt tools
+├── bench/                  # webdriver benchmark fixtures and runner
 └── README.md
 ```
 
@@ -71,22 +76,20 @@ belt/
 
 | Tool | Purpose | Key Commands |
 | :--- | :--- | :--- |
-| **`scaffold`** | Instant offline project scaffolder (TS/Bun/Biome, Rust, Go, Python/uv) | `scaffold ts -n my-app`<br>`scaffold rust`<br>`scaffold --list` |
 | **`portkill`** | Sub-millisecond port inspector and process killer | `portkill`<br>`portkill 3000 8080`<br>`portkill -f node` |
 | **`jwt`** | Zero-dependency JWT inspector, claim extractor & claim humanizer | `jwt <TOKEN>`<br>`pbpaste \| jwt`<br>`jwt -c exp,sub <TOKEN>` |
-| **`devclean`** | Multi-ecosystem build artifact scanner & disk space reclaimer | `devclean`<br>`devclean ~/dev --clean`<br>`devclean -t rust,node` |
-| **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout check:full --dry-run`<br>`fanout --filter '@renkonos/*' --topological` |
+| **`fanout`** | Concurrent quality gate & task matrix runner with topological DAG, Git change detection & live TUI | `fanout`<br>`fanout lint typecheck test --bail`<br>`fanout --since main`<br>`fanout check:full --dry-run`<br>`fanout --filter '@acme/*' --topological` |
 | **`webdriver`** | Zero-dependency browser automation, persistent sessions & screenshot engine. Terse one-line-per-step output (`ok` / `warn` / `err`), `text=` and `role=` locators, buffered console errors, streaming `--repl` | `webdriver --session my-app http://localhost:3000 wait-for-hydration click 'role=button:Save' console`<br>`webdriver https://app.dev viewport 1440 900 screenshot out.png --full-page`<br>`webdriver --repl < script.wd`<br>`webdriver --list-sessions` |
-| **`grabsite`** | Hardened GUI browser screenshot engine for CDP-disabled builds (Mullvad Browser, Tor Browser) via private virtual displays & settled-pixel detection | `grabsite https://example.com`<br>`grabsite --browser chrome https://example.com`<br>`grabsite -o shot.png --timeout 120 https://example.com`<br>`grabsite --display :0 https://example.com` |
 | **`belt-pr`** (`belt pr`) | Terminal-friendly, visually compelling GitHub pull request overview (infers PR from current git cwd by default) | `belt-pr`<br>`belt pr 142`<br>`belt-pr -c`<br>`belt-pr --checks --files` |
 | **`belt`** | Runs any belt tool by name and serves every tool as a stdio MCP server | `belt jwt <TOKEN>`<br>`belt mcp` |
 
 ### `belt` as an MCP server
 
-`belt mcp` speaks MCP over stdio. It exposes each tool as an MCP tool that
-takes `{ "args": ["..."] }`, runs the sibling binary without a shell and with
-stdin closed, and returns stdout, stderr and the exit code as text.
-`scaffold`, `portkill` and `devclean` carry `destructiveHint: true`.
+`belt mcp` speaks MCP over stdio. It exposes:
+
+- **Every belt tool** as an MCP tool taking `{ "args": ["..."] }` — runs the sibling binary without a shell and with stdin closed, returning stdout, stderr, and the exit code as text. `portkill` carries `destructiveHint: true`.
+- **Typed `browser_*` tools** (`browser_open`, `browser_snapshot`, `browser_find`, `browser_text`, `browser_click`, `browser_fill`, `browser_press`, `browser_settle`, `browser_dialog`, `browser_url`) with named string parameters.
+- **Persistent browser session**: both `browser_*` and eligible `webdriver` calls reuse a kept-alive `webdriver --repl` child so the browser stays open across MCP calls (set `BELT_MCP_ONESHOT=1` or pass leading flags like `--session` to force a one-shot process).
 
 ```sh
 claude mcp add belt -- belt mcp
@@ -97,7 +100,11 @@ first, then `PATH`.
 
 ### Configuring `fanout`
 
-`fanout check` resolves its task list by convention: every root `package.json`
+`fanout` supports both JavaScript (`package.json`) and Rust (`Cargo.toml`)
+workspaces. For Cargo workspaces, `check` runs `fmt-check`, `lint`, and `test`
+(also supports `build`).
+
+For JS workspaces, `fanout check` resolves its task list by convention: every root `package.json`
 script named `lint`, `typecheck`, `fmt:check` or `format:check`, then the first test script it finds
 (`test:unit`, `test` — or `test:all`, `test:full`, `test` for `check:full`), then
 one task per workspace package that declares `check`, falling back to
@@ -110,7 +117,7 @@ root:
 {
   "targets": {
     "check:full": {
-      "root": ["lint", "typecheck", "test:full", "seed:check", "bootstrap:conformance"],
+      "root": ["lint", "typecheck", "test:full", "db:check", "e2e:smoke"],
       "package": "check"
     }
   }
@@ -121,12 +128,13 @@ root:
 with no entry keeps the conventions. `fanout <target> --dry-run` prints the
 resolved list without running it — the quickest way to confirm a config.
 
-Ready tasks start longest-first. Names containing `test` rank as heavy; a long
-task named anything else gets a `cost` so it does not start behind short ones
-(`test*` scores 3, the default is 0):
+Ready tasks start longest-first. Built-in heuristic scores: `test*` / `*:test*`
+scores 3, `*dashboard*` / `*ui*` scores 2, `*:typecheck` scores 1, and
+everything else scores 0. Give any other slow task an explicit `cost` so it
+does not start behind short ones:
 
 ```json
-{ "targets": { "check:full": { "root": ["…"], "cost": { "seed:check": 5, "bootstrap:self-tsc": 5 } } } }
+{ "targets": { "check:full": { "root": ["…"], "cost": { "db:check": 5, "e2e:smoke": 5 } } } }
 ```
 
 ### `fanout` in CI
@@ -159,8 +167,7 @@ the mode: `NO_COLOR` on a terminal keeps the live view.
 * **Zero external dependencies** (std only across crates). Builds and tests fully offline
   with instant compilation speed.
 * **Per-tool homes are predictable**: `~/.config/belt/<tool>/` for
-  config, `~/.local/share/belt/<tool>/` for data — XDG-style on purpose
-  to match the rest of this machine's `~/.config/` dotfiles.
+  config, `~/.local/share/belt/<tool>/` for data (XDG-style across tools).
 * **`Cargo.lock` is committed** — this is a binary-producing workspace.
 
 ## Adding a new tool
@@ -174,6 +181,7 @@ the mode: `NO_COLOR` on a terminal keeps the live view.
    edition.workspace = true
    authors.workspace = true
    license.workspace = true
+   publish.workspace = true
 
    [[bin]]
    name = "<tool>"
@@ -185,19 +193,17 @@ the mode: `NO_COLOR` on a terminal keeps the live view.
    [lints]
    workspace = true
    ```
-3. Add `"crates/<tool>"` to the `members` array in the root `Cargo.toml`.
-4. `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
+3. Add `"crates/<tool>"` to `members` and `default-members` in the root `Cargo.toml`.
+4. Register the binary in `crates/belt/src/lib.rs` (`TOOLS`), `Justfile` (`install-all`), `install.sh`, `install.ps1`, and `.github/workflows/release.yml`.
+5. `cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
 
 ## Status
 
 - ✅ Workspace scaffolding + CI-ready lint policy + `.gitignore`.
 - ✅ `local-common` — per-tool path resolution and terminal-aware colour helpers. Test-covered.
-- ✅ `scaffold` — offline project generator (TypeScript, Rust, Go, Python). Test-covered.
 - ✅ `portkill` — fast port inspector & process killer. Test-covered.
 - ✅ `jwt` — zero-dependency JWT decoder & timestamp humanizer. Test-covered.
-- ✅ `devclean` — multi-ecosystem project artifact scanner & reclaimer. Test-covered.
 - ✅ `fanout` — concurrent quality gate & task matrix runner with interactive TUI. Test-covered.
 - ✅ `webdriver` — zero-dependency browser automation, DSL runner & screenshot engine. Test-covered.
-- ✅ `grabsite` — GUI browser screenshot engine for CDP-disabled builds. Test-covered.
 - ✅ `belt-pr` (`belt pr`) — Terminal-friendly GitHub pull request overview. Test-covered.
 - ✅ `belt` — tool dispatcher and stdio MCP server. Test-covered.

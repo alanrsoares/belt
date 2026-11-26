@@ -57,7 +57,7 @@ install tool:
 
 # Install all CLI tools into ~/.cargo/bin
 install-all:
-    @failed=; for tool in scaffold portkill jwt devclean fanout webdriver grabsite pr belt; do \
+    @failed=; for tool in portkill jwt fanout webdriver pr belt; do \
         echo "==> Installing $tool..."; \
         cargo install --path "crates/$tool" --force || failed="$failed $tool"; \
         just _shadowed "$tool"; \
