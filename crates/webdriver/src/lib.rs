@@ -308,7 +308,10 @@ fn run_step(
             if landed.starts_with("chrome-error://") {
                 return Err(format!("navigation to '{url}' failed (no response)"));
             }
-            Outcome::with(landed)
+            match redirect_note(url, &landed) {
+                Some(note) => Outcome::warn(format!("{landed}\n{note}")),
+                None => Outcome::with(landed),
+            }
         }
         Step::Viewport { width, height } => {
             session.set_viewport(*width, *height)?;
@@ -341,6 +344,21 @@ fn run_step(
             Outcome::with(format!("recording to {path}"))
         }
         Step::Record { path: None } => recording_outcome(session.stop_recording()?, c),
+        Step::RecordSpeed { factor } => {
+            session.set_record_speed(*factor)?;
+            Outcome::with(format!("speed {factor}x"))
+        }
+        Step::If {
+            selector,
+            visible,
+            then,
+        } => {
+            if session.is_visible(selector)? == *visible {
+                return run_step(session, then, step_num, opts, out, c);
+            }
+            let state = if *visible { "not visible" } else { "visible" };
+            Outcome::with(format!("skipped: '{selector}' is {state}"))
+        }
         Step::Caption { text, duration_ms } => {
             session.caption(text, *duration_ms)?;
             Outcome::ok()
@@ -521,7 +539,9 @@ fn verb_of(step: &Step) -> &'static str {
         Step::WaitForUrl { .. } => "wait-for-url",
         Step::WaitForHydration { .. } => "wait-for-hydration",
         Step::Wait { .. } => "wait",
-        Step::Record { .. } => "record",
+        Step::Record { .. } | Step::RecordSpeed { .. } => "record",
+        Step::If { visible: true, .. } => "if",
+        Step::If { .. } => "unless",
         Step::Caption { .. } => "caption",
         Step::Reload { .. } => "reload",
         Step::Click { .. } => "click",
@@ -545,6 +565,32 @@ fn verb_of(step: &Step) -> &'static str {
         Step::Html { .. } => "html",
         Step::Close => "close",
     }
+}
+
+/// `scheme://host[:port]` of an http(s) URL, lowercased and without a default
+/// port; `None` for data:, about: and the like.
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest, default_port) = match url.split_once("://")? {
+        (s, r) if s.eq_ignore_ascii_case("http") => ("http", r, ":80"),
+        (s, r) if s.eq_ignore_ascii_case("https") => ("https", r, ":443"),
+        _ => return None,
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, h)| h)
+        .to_ascii_lowercase();
+    let host = host.strip_suffix(default_port).unwrap_or(&host);
+    Some(format!("{scheme}://{host}"))
+}
+
+/// A `goto` that ends on another origin usually hit a sign-in wall, and the
+/// steps after it would act on the wrong page.
+fn redirect_note(asked: &str, landed: &str) -> Option<String> {
+    let (from, to) = (origin(asked)?, origin(landed)?);
+    (from != to).then(|| {
+        format!("landed on {to}, not {from} (a sign-in redirect? the session may have expired)")
+    })
 }
 
 fn recording_outcome(done: record::Finished, c: &Colour) -> Outcome {
@@ -684,6 +730,34 @@ mod tests {
     use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn origin_is_scheme_host_and_port() {
+        assert_eq!(
+            origin("http://localhost:3000/import?x=1"),
+            Some("http://localhost:3000".to_string())
+        );
+        assert_eq!(
+            origin("https://a.test#top"),
+            Some("https://a.test".to_string())
+        );
+        assert_eq!(redirect_note("HTTP://A.Test:80/x", "http://a.test/y"), None);
+        assert_eq!(
+            redirect_note("https://a.test:443/", "https://a.test/"),
+            None
+        );
+        assert!(redirect_note("https://a.test:8443/", "https://a.test/").is_some());
+        assert_eq!(origin("data:text/html,<p>"), None);
+        assert_eq!(
+            redirect_note("http://localhost:3000/import", "http://localhost:5001/Account/Login"),
+            Some("landed on http://localhost:5001, not http://localhost:3000 (a sign-in redirect? the session may have expired)".to_string())
+        );
+        assert_eq!(
+            redirect_note("http://localhost:3000/a", "http://localhost:3000/b"),
+            None
+        );
+        assert_eq!(redirect_note("data:text/html,x", "about:blank"), None);
+    }
 
     #[test]
     fn help_and_version_write_to_out_buffer() {

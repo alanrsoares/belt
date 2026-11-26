@@ -197,7 +197,15 @@ for tool in $TOOLS; do
 done
 
 case ":$PATH:" in
-  *":$BIN_DIR:"*) ;;
+  *":$BIN_DIR:"*)
+    # An older copy earlier on PATH (cargo install, a previous BIN_DIR) would
+    # keep answering to the name, and the new verbs would seem missing.
+    for tool in $TOOLS; do
+      found=$(command -v "${tool}${EXE_EXT}" 2>/dev/null || true)
+      if [ -n "$found" ] && [ "$found" != "$BIN_DIR/${tool}${EXE_EXT}" ]; then
+        say "note: \`$tool\` runs $found, which comes before $BIN_DIR on PATH; remove it or reorder PATH"
+      fi
+    done ;;
   *) say "note: $BIN_DIR is not on your PATH — add:
        export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
