@@ -19,9 +19,9 @@ pub struct Recorder {
     dir: PathBuf,
     /// Frame times on the video's clock, which `speed` runs faster or slower.
     stamps: Vec<f64>,
-    /// Since `anchor.0` (real time), the video's clock runs at `speed`.
-    anchor: (f64, f64),
-    speed: f64,
+    /// `(real, video, speed)`: from real time `real` on, the video's clock
+    /// runs at `speed`. All kept, since a frame can arrive after a later change.
+    segments: Vec<(f64, f64, f64)>,
     /// First frame that could not be stored; `finish` reports it.
     error: Option<String>,
 }
@@ -44,21 +44,21 @@ impl Recorder {
             out: out.to_string(),
             dir,
             stamps: Vec::new(),
-            anchor: (0.0, 0.0),
-            speed: 1.0,
+            segments: vec![(0.0, 0.0, 1.0)],
             error: None,
         })
     }
 
     /// Real time `t` on the video's clock.
     fn at(&self, t: f64) -> f64 {
-        self.anchor.1 + (t - self.anchor.0) / self.speed
+        let (real, video, speed) =
+            self.segments[self.segments.iter().rposition(|s| s.0 <= t).unwrap_or(0)];
+        video + (t - real) / speed
     }
 
     /// From real time `at` on, play the video at `factor` times real speed.
     pub fn set_speed(&mut self, at: f64, factor: f64) {
-        self.anchor = (at, self.at(at));
-        self.speed = factor;
+        self.segments.push((at, self.at(at), factor));
     }
 
     pub fn set_speed_now(&mut self, factor: f64) {
@@ -265,6 +265,19 @@ mod tests {
         // 2s at 1x, then 8s at 4x: the video is 4s, not 10s.
         assert_eq!(rec.stamps, vec![10.0, 11.0, 12.0, 13.0]);
         assert_eq!(rec.at(20.0), 14.0);
+        rec.discard();
+    }
+
+    #[test]
+    fn a_late_frame_keeps_the_speed_it_was_captured_at() {
+        let out = std::env::temp_dir().join(format!("wd-rec-late-{}.mp4", std::process::id()));
+        let mut rec = Recorder::start(out.to_str().unwrap()).unwrap();
+        rec.add(10.0, Ok(vec![0xff]));
+        rec.set_speed(12.0, 0.5);
+        // Captured at 11.0 (1x), delivered after the change to 0.5x.
+        rec.add(11.0, Ok(vec![0xff]));
+        rec.add(13.0, Ok(vec![0xff]));
+        assert_eq!(rec.stamps, vec![10.0, 11.0, 14.0]);
         rec.discard();
     }
 

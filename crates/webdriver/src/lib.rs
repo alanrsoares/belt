@@ -567,13 +567,21 @@ fn verb_of(step: &Step) -> &'static str {
     }
 }
 
-/// `scheme://host[:port]` of an http(s) URL; `None` for data:, about: and the like.
-fn origin(url: &str) -> Option<&str> {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    Some(&url[..url.len() - rest.len() + host_end])
+/// `scheme://host[:port]` of an http(s) URL, lowercased and without a default
+/// port; `None` for data:, about: and the like.
+fn origin(url: &str) -> Option<String> {
+    let (scheme, rest, default_port) = match url.split_once("://")? {
+        (s, r) if s.eq_ignore_ascii_case("http") => ("http", r, ":80"),
+        (s, r) if s.eq_ignore_ascii_case("https") => ("https", r, ":443"),
+        _ => return None,
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, h)| h)
+        .to_ascii_lowercase();
+    let host = host.strip_suffix(default_port).unwrap_or(&host);
+    Some(format!("{scheme}://{host}"))
 }
 
 /// A `goto` that ends on another origin usually hit a sign-in wall, and the
@@ -727,9 +735,18 @@ mod tests {
     fn origin_is_scheme_host_and_port() {
         assert_eq!(
             origin("http://localhost:3000/import?x=1"),
-            Some("http://localhost:3000")
+            Some("http://localhost:3000".to_string())
         );
-        assert_eq!(origin("https://a.test#top"), Some("https://a.test"));
+        assert_eq!(
+            origin("https://a.test#top"),
+            Some("https://a.test".to_string())
+        );
+        assert_eq!(redirect_note("HTTP://A.Test:80/x", "http://a.test/y"), None);
+        assert_eq!(
+            redirect_note("https://a.test:443/", "https://a.test/"),
+            None
+        );
+        assert!(redirect_note("https://a.test:8443/", "https://a.test/").is_some());
         assert_eq!(origin("data:text/html,<p>"), None);
         assert_eq!(
             redirect_note("http://localhost:3000/import", "http://localhost:5001/Account/Login"),

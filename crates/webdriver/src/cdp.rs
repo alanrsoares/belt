@@ -1044,9 +1044,14 @@ impl CdpSession {
                     );
                     match visible {
                         Ok(JsonValue::Bool(true)) => return Ok(object_id),
-                        _ => {
+                        Ok(_) => {
                             self.release(&object_id);
                             reason = format!("'{spec}' matched but is not visible");
+                        }
+                        // A probe that failed says nothing about visibility.
+                        Err(e) => {
+                            self.release(&object_id);
+                            reason = e;
                         }
                     }
                 }

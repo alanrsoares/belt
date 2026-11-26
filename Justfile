@@ -57,16 +57,17 @@ install tool:
 
 # Install all CLI tools into ~/.cargo/bin
 install-all:
-    @for tool in scaffold portkill jwt devclean fanout webdriver grabsite pr belt; do \
+    @failed=; for tool in scaffold portkill jwt devclean fanout webdriver grabsite pr belt; do \
         echo "==> Installing $tool..."; \
-        cargo install --path "crates/$tool" --force; \
+        cargo install --path "crates/$tool" --force || failed="$failed $tool"; \
         just _shadowed "$tool"; \
-    done
+    done; \
+    if [ -n "$failed" ]; then echo "failed to install:$failed"; exit 1; fi
 
 # Warn when an older copy earlier on PATH (install.sh's ~/.local/bin) still answers to the name
 _shadowed tool:
     @bin={{tool}}; [ "$bin" = pr ] && bin=belt-pr; \
-    want="${CARGO_HOME:-$HOME/.cargo}/bin/$bin"; found=$(command -v "$bin" || true); \
+    want="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/$bin"; found=$(command -v "$bin" || true); \
     if [ -n "$found" ] && [ "$found" != "$want" ]; then \
         echo "note: \`$bin\` runs $found, which comes before $want on PATH; remove it or reorder PATH"; \
     fi
