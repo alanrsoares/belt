@@ -1021,49 +1021,48 @@ impl CdpSession {
         let timeout = Duration::from_millis(timeout_ms);
 
         loop {
-            let reason;
-            let candidate = match spec.strip_prefix("ref=") {
-                Some(reference) => self.resolve_reference(reference),
-                None => self.evaluate_handle(&locator::with_prelude(&format!(
-                    "window.__wd.find(\"{}\")",
-                    json::escape_str(spec)
-                ))),
+            let reason = match self.probe(spec, need_visible) {
+                Ok(Ok(object_id)) => return Ok(object_id),
+                Ok(Err(reason)) | Err(reason) => reason,
             };
-
-            match candidate {
-                Ok(Some(object_id)) if !need_visible => return Ok(object_id),
-                Ok(Some(object_id)) => {
-                    let visible = self.call_on(
-                        &object_id,
-                        r#"function() {
-                            if (window.__wd) return window.__wd.visible(this);
-                            if (!this || !this.getClientRects().length) return false;
-                            const s = getComputedStyle(this);
-                            return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;
-                        }"#,
-                    );
-                    match visible {
-                        Ok(JsonValue::Bool(true)) => return Ok(object_id),
-                        Ok(_) => {
-                            self.release(&object_id);
-                            reason = format!("'{spec}' matched but is not visible");
-                        }
-                        // A probe that failed says nothing about visibility.
-                        Err(e) => {
-                            self.release(&object_id);
-                            reason = e;
-                        }
-                    }
-                }
-                Ok(None) => reason = format!("no element matched '{spec}'"),
-                Err(e) => reason = e,
-            }
-
             if start.elapsed() >= timeout {
                 return Err(format!("{reason} after {timeout_ms}ms"));
             }
             let _ = self.idle(50);
         }
+    }
+
+    /// One lookup of `spec`. `Ok(Err(reason))` means no element matched, or
+    /// it matched but is hidden; `Err` means the lookup itself failed.
+    fn probe(&mut self, spec: &str, need_visible: bool) -> Result<Result<String, String>, String> {
+        let candidate = match spec.strip_prefix("ref=") {
+            Some(reference) => self.resolve_reference(reference)?,
+            None => self.evaluate_handle(&locator::with_prelude(&format!(
+                "window.__wd.find(\"{}\")",
+                json::escape_str(spec)
+            )))?,
+        };
+        let Some(object_id) = candidate else {
+            return Ok(Err(format!("no element matched '{spec}'")));
+        };
+        if !need_visible {
+            return Ok(Ok(object_id));
+        }
+        let visible = self.call_on(
+            &object_id,
+            r#"function() {
+                if (window.__wd) return window.__wd.visible(this);
+                if (!this || !this.getClientRects().length) return false;
+                const s = getComputedStyle(this);
+                return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity) > 0;
+            }"#,
+        );
+        if matches!(visible, Ok(JsonValue::Bool(true))) {
+            return Ok(Ok(object_id));
+        }
+        self.release(&object_id);
+        // A probe that failed says nothing about visibility.
+        visible.map(|_| Err(format!("'{spec}' matched but is not visible")))
     }
 
     fn resolve_reference(&mut self, reference: &str) -> Result<Option<String>, String> {
@@ -1191,15 +1190,12 @@ impl CdpSession {
     /// Whether `spec` names a visible element right now, without waiting.
     /// A locator that cannot run (bad CSS, stale ref) is an error, not `false`.
     pub fn is_visible(&mut self, spec: &str) -> Result<bool, String> {
-        match self.resolve(spec, 0) {
+        match self.probe(spec, true)? {
             Ok(object_id) => {
                 self.release(&object_id);
                 Ok(true)
             }
-            Err(e) if e.starts_with("no element matched") || e.contains("is not visible") => {
-                Ok(false)
-            }
-            Err(e) => Err(e),
+            Err(_) => Ok(false),
         }
     }
 
