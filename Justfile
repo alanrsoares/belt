@@ -50,26 +50,39 @@ build-release:
 # Installation
 # ------------------------------------------------------------------------------
 
-# Install a single tool into ~/.cargo/bin (e.g. `just install webdriver`)
+bin_dir := env("BELT_BIN_DIR", env("HOME") / ".local/bin")
+
+# Install a single tool into ~/.local/bin (override with BELT_BIN_DIR)
 install tool:
-    cargo install --path "crates/{{tool}}" --force
-    @just _shadowed {{tool}}
+    #!/usr/bin/env sh
+    set -eu
+    pkg={{tool}}
+    [ "$pkg" = belt-pr ] && pkg=pr
+    bin="$pkg"
+    [ "$bin" = pr ] && bin=belt-pr
+    cargo build --release -p "$pkg"
+    mkdir -p "{{bin_dir}}"
+    install -m 755 "${CARGO_TARGET_DIR:-target}/release/$bin" "{{bin_dir}}/$bin"
+    printf '✓ %s/%s\n' "{{bin_dir}}" "$bin"
+    just _shadowed "$bin"
 
-# Install all CLI tools into ~/.cargo/bin
+# Install all CLI tools into ~/.local/bin (override with BELT_BIN_DIR)
 install-all:
-    @failed=; for tool in portkill jwt fanout webdriver pr belt; do \
-        echo "==> Installing $tool..."; \
-        cargo install --path "crates/$tool" --force || failed="$failed $tool"; \
-        just _shadowed "$tool"; \
-    done; \
-    if [ -n "$failed" ]; then echo "failed to install:$failed"; exit 1; fi
+    #!/usr/bin/env sh
+    set -eu
+    cargo build --release --workspace
+    mkdir -p "{{bin_dir}}"
+    for bin in portkill jwt fanout webdriver belt-pr belt; do
+        install -m 755 "${CARGO_TARGET_DIR:-target}/release/$bin" "{{bin_dir}}/$bin"
+        printf '✓ %s/%s\n' "{{bin_dir}}" "$bin"
+        just _shadowed "$bin"
+    done
 
-# Warn when an older copy earlier on PATH (install.sh's ~/.local/bin) still answers to the name
-_shadowed tool:
-    @bin={{tool}}; [ "$bin" = pr ] && bin=belt-pr; \
-    want="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/$bin"; found=$(command -v "$bin" || true); \
+# Warn when an older copy earlier on PATH still answers to the name
+_shadowed bin:
+    @want="{{bin_dir}}/{{bin}}"; found=$(command -v "{{bin}}" || true); \
     if [ -n "$found" ] && [ "$found" != "$want" ]; then \
-        echo "note: \`$bin\` runs $found, which comes before $want on PATH; remove it or reorder PATH"; \
+        echo "note: \`{{bin}}\` runs $found, which comes before $want on PATH; remove it or reorder PATH"; \
     fi
 
 # ------------------------------------------------------------------------------
