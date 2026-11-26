@@ -168,22 +168,20 @@ pub fn parse_script(script: &str, default_timeout_ms: u64) -> Result<Vec<Step>, 
 /// Split a line into tokens, respecting single and double quotes.
 pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut has_token = false;
+    let mut current: Option<String> = None;
     let mut in_quote = None;
     let mut escape = false;
 
     for ch in line.chars() {
         if escape {
-            current.push(ch);
-            has_token = true;
+            current.get_or_insert_with(String::new).push(ch);
             escape = false;
             continue;
         }
 
         if ch == '\\' && in_quote != Some('\'') {
             escape = true;
-            has_token = true;
+            current.get_or_insert_with(String::new);
             continue;
         }
 
@@ -191,34 +189,32 @@ pub fn tokenize_line(line: &str) -> Result<Vec<String>, String> {
             if ch == q {
                 in_quote = None;
             } else {
-                current.push(ch);
+                current.get_or_insert_with(String::new).push(ch);
             }
-        } else if (ch == '"' || ch == '\'') && !has_token {
+        } else if (ch == '"' || ch == '\'') && current.is_none() {
             // Quotes only group when they open a token, so JS like
             // `eval document.getElementById("out")` keeps its inner quotes.
             in_quote = Some(ch);
-            has_token = true;
+            current = Some(String::new());
         } else if ch.is_whitespace() {
-            if has_token {
-                tokens.push(std::mem::take(&mut current));
-                has_token = false;
+            if let Some(tok) = current.take() {
+                tokens.push(tok);
             }
         } else {
-            current.push(ch);
-            has_token = true;
+            current.get_or_insert_with(String::new).push(ch);
         }
     }
 
     if escape {
-        current.push('\\');
+        current.get_or_insert_with(String::new).push('\\');
     }
 
     if in_quote.is_some() {
         return Err("unclosed quote in line".to_string());
     }
 
-    if has_token {
-        tokens.push(current);
+    if let Some(tok) = current {
+        tokens.push(tok);
     }
 
     Ok(tokens)
@@ -846,6 +842,7 @@ mod tests {
 
         // Unquoted multi-word locators are rejected uniformly across all verbs.
         assert!(parse_script("click text=Late Button", 30_000).is_err());
+        assert!(parse_script("hover text=Late Button", 30_000).is_err());
 
         let mixed = parse_tokens(
             &[
@@ -1040,6 +1037,7 @@ mod tests {
             tokenize_line(r#"fill #q """#).unwrap(),
             vec!["fill", "#q", ""]
         );
+        assert_eq!(tokenize_line("fill #q ''").unwrap(), vec!["fill", "#q", ""]);
         assert_eq!(
             tokenize_line(r"eval 'C:\foo\bar'").unwrap(),
             vec!["eval", r"C:\foo\bar"]
@@ -1133,6 +1131,12 @@ mod tests {
             ]
         );
         assert!(parse_script("record", 1000).is_err());
+        assert_eq!(
+            parse_script("record close", 1000).unwrap(),
+            vec![Step::Record {
+                path: Some("close".into())
+            }]
+        );
         assert_eq!(
             parse_script("upload \"#file\" ./a.docx", 1000).unwrap(),
             vec![Step::Upload {
